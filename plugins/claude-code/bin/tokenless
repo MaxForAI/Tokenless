@@ -1,0 +1,2403 @@
+#!/usr/bin/env node
+'use strict';
+
+const path = require('path');
+const fs = require('fs');
+const { spawn } = require('child_process');
+const os = require('os');
+
+const { isNoisyCommand, getReducerForCommand, getReducerForOutput } = require('../lib/classify');
+const { compactOutput, estimateTokens } = require('../lib/compact');
+const { shouldCompactRead, summarizeRead } = require('../lib/read_compact');
+const { clearReadGate, markReadPacket, listReadGates, listReadPackets } = require('../lib/read_gate');
+const {
+  createArtifact,
+  readArtifact,
+  listArtifacts,
+  readStatsEntries,
+  summarizeStats,
+  normalizeStatsSource,
+  formatArtifactId,
+  readObservationEntries,
+  summarizeObservations,
+  expandArtifactAround,
+  expandArtifactLines,
+  formatArtifactPointer
+} = require('../lib/artifact_store');
+
+function usage() {
+  console.log('Usage:');
+  console.log('  tokenless run --agent --data-dir <dir> -- <command>');
+  console.log('  tokenless run --agent --data-dir <dir> --cmd-b64 <base64-shell-command>');
+  console.log('  tokenless read --agent --data-dir <dir> <file>');
+  console.log('  tokenless compact --type <reducer> --data-dir <dir> --stdin');
+  console.log('  tokenless doctor --data-dir <dir>');
+  console.log('  tokenless status --user|--project [--settings <path>]');
+  console.log('  tokenless print-hooks [--data-dir <dir>]');
+  console.log('  tokenless install-hooks --user|--project [--settings <path>] [--dry-run]');
+  console.log('  tokenless uninstall-hooks --user|--project [--settings <path>] [--dry-run]');
+  console.log('  tokenless repair-hooks --user [--project] [--dry-run]');
+  console.log('  tokenless install-commands [--user] [--data-dir <dir>] [--dry-run]');
+  console.log('  tokenless uninstall-commands [--user] [--dry-run]');
+  console.log('  tokenless api-usage [--source <dir>] [--since <24h|7d>]');
+  console.log('  tokenless api-probe start|stop|inspect|latest|stats [--dir <dir>] [--data-dir <dir>] [--keyword <text>] [--show-snippet]');
+  console.log('  tokenless list --data-dir <dir> [--limit <n>]');
+  console.log('  tokenless latest --data-dir <dir>');
+  console.log('  tokenless stats --data-dir <dir>');
+  console.log('  tokenless show <artifact_id> --data-dir <dir>');
+  console.log('  tokenless expand <artifact_id|latest> --around <keyword> --data-dir <dir>');
+  console.log('  tokenless clean --data-dir <dir> [--keep <n>] [--older-than <7d|24h|60m>] [--dry-run]');
+}
+
+function stripQuotes(value) {
+  if (typeof value !== 'string') {
+    return value;
+  }
+
+  const startsSingle = value.startsWith("'") && value.endsWith("'");
+  const startsDouble = value.startsWith('"') && value.endsWith('"');
+  if (value.length >= 2 && (startsSingle || startsDouble)) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+function parseShowOrExpandArgs(args) {
+  let around;
+  let lines;
+  let dataDir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.tokenless');
+  const positional = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--data-dir') {
+      dataDir = stripQuotes(args[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (arg === '--around') {
+      around = args[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === '--lines') {
+      lines = args[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === '--') {
+      continue;
+    }
+    positional.push(arg);
+  }
+
+  return { dataDir, around, lines, positional };
+}
+
+function parseRunArgs(argv) {
+  let i = 0;
+  let agent = false;
+  let dataDir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.tokenless');
+  let encodedCommand = null;
+
+  while (i < argv.length) {
+    const arg = argv[i];
+    if (arg === '--agent') {
+      agent = true;
+      i += 1;
+      continue;
+    }
+    if (arg === '--data-dir') {
+      dataDir = stripQuotes(argv[i + 1]);
+      i += 2;
+      continue;
+    }
+    if (arg === '--cmd-b64') {
+      encodedCommand = Buffer.from(String(argv[i + 1] || ''), 'base64').toString('utf8');
+      i += 2;
+      continue;
+    }
+    if (arg === '--') {
+      i += 1;
+      break;
+    }
+    i += 1;
+  }
+
+  const commandParts = argv.slice(i);
+  return { agent, dataDir, commandParts, encodedCommand };
+}
+
+function parseCompactArgs(argv) {
+  let dataDir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.tokenless');
+  let reducer = null;
+  let stdin = false;
+  let commandLabel = 'stdin';
+  let exitCode = 0;
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--data-dir') {
+      dataDir = stripQuotes(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (arg === '--type') {
+      reducer = argv[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === '--stdin') {
+      stdin = true;
+      continue;
+    }
+    if (arg === '--command') {
+      commandLabel = argv[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === '--exit-code') {
+      exitCode = Number(argv[i + 1]) || 0;
+      i += 1;
+      continue;
+    }
+  }
+
+  return { dataDir, reducer, stdin, commandLabel, exitCode };
+}
+
+function parseReadArgs(argv) {
+  let agent = false;
+  let dataDir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.tokenless');
+  const positional = [];
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--agent') {
+      agent = true;
+      continue;
+    }
+    if (arg === '--data-dir') {
+      dataDir = stripQuotes(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (arg === '--') {
+      continue;
+    }
+    positional.push(arg);
+  }
+
+  return { agent, dataDir, filePath: stripQuotes(positional[0] || '') };
+}
+
+function parseDoctorArgs(argv) {
+  let dataDir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.tokenless');
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--data-dir') {
+      dataDir = stripQuotes(argv[i + 1]);
+      i += 1;
+    }
+  }
+  return { dataDir };
+}
+
+function parseListArgs(argv) {
+  let dataDir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.tokenless');
+  let limit = 20;
+
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--data-dir') {
+      dataDir = stripQuotes(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (argv[i] === '--limit') {
+      limit = Math.max(1, Number(argv[i + 1]) || limit);
+      i += 1;
+    }
+  }
+
+  return { dataDir, limit };
+}
+
+function parseCleanArgs(argv) {
+  let dataDir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.tokenless');
+  let keep = null;
+  let olderThan = null;
+  let dryRun = false;
+
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--data-dir') {
+      dataDir = stripQuotes(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (argv[i] === '--keep') {
+      keep = Math.max(0, Number(argv[i + 1]) || 0);
+      i += 1;
+      continue;
+    }
+    if (argv[i] === '--older-than') {
+      olderThan = String(argv[i + 1] || '');
+      i += 1;
+      continue;
+    }
+    if (argv[i] === '--dry-run') {
+      dryRun = true;
+    }
+  }
+
+  return { dataDir, keep, olderThan, dryRun };
+}
+
+function parseSlashCommandArgs(argv) {
+  let scope = 'user';
+  let dryRun = false;
+  let dataDir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.tokenless');
+  let commandsDir = null;
+
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--user') {
+      scope = 'user';
+      continue;
+    }
+    if (argv[i] === '--dry-run') {
+      dryRun = true;
+      continue;
+    }
+    if (argv[i] === '--data-dir') {
+      dataDir = stripQuotes(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (argv[i] === '--commands-dir') {
+      commandsDir = stripQuotes(argv[i + 1]);
+      i += 1;
+    }
+  }
+
+  return { scope, dryRun, dataDir, commandsDir };
+}
+
+function parseApiUsageArgs(argv) {
+  let source = path.join(os.homedir(), '.claude', 'projects');
+  let since = null;
+
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--source') {
+      source = stripQuotes(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (argv[i] === '--since') {
+      since = String(argv[i + 1] || '');
+      i += 1;
+    }
+  }
+
+  return { source, since };
+}
+
+function parseApiProbeArgs(argv) {
+  const action = argv[0] || 'help';
+  let dir = path.join(os.homedir(), '.tokenless', 'api-bodies');
+  let dataDir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.tokenless');
+  let keyword = null;
+  let showSnippet = false;
+
+  for (let i = 1; i < argv.length; i++) {
+    if (argv[i] === '--dir') {
+      dir = stripQuotes(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (argv[i] === '--data-dir') {
+      dataDir = stripQuotes(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (argv[i] === '--keyword') {
+      keyword = argv[i + 1];
+      i += 1;
+      continue;
+    }
+    if (argv[i] === '--show-snippet') {
+      showSnippet = true;
+    }
+  }
+
+  return { action, dir, dataDir, keyword, showSnippet };
+}
+
+function parseInstallHooksArgs(argv) {
+  let scope = null;
+  let settingsPath = null;
+  let dryRun = false;
+
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--project') {
+      scope = 'project';
+      continue;
+    }
+    if (argv[i] === '--user') {
+      scope = 'user';
+      continue;
+    }
+    if (argv[i] === '--settings') {
+      settingsPath = stripQuotes(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (argv[i] === '--dry-run') {
+      dryRun = true;
+    }
+  }
+
+  return { scope, settingsPath, dryRun };
+}
+
+function parseSettingsScopeArgs(argv) {
+  let scope = null;
+  let settingsPath = null;
+  let dryRun = false;
+
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--user') {
+      scope = 'user';
+      continue;
+    }
+    if (argv[i] === '--project') {
+      scope = 'project';
+      continue;
+    }
+    if (argv[i] === '--settings') {
+      settingsPath = stripQuotes(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (argv[i] === '--dry-run') {
+      dryRun = true;
+    }
+  }
+
+  return { scope, settingsPath, dryRun };
+}
+
+function okLine(label, value) {
+  console.log(`[ok] ${label}: ${value}`);
+}
+
+function failLine(label, value) {
+  console.log(`[fail] ${label}: ${value}`);
+}
+
+function checkReadableJson(label, filePath) {
+  try {
+    JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    okLine(label, filePath);
+    return true;
+  } catch (err) {
+    failLine(label, `${filePath} (${err.message})`);
+    return false;
+  }
+}
+
+function runDoctor(dataDir) {
+  const pluginRoot = path.resolve(__dirname, '..');
+  const hooksPath = path.join(pluginRoot, 'hooks', 'hooks.json');
+  const manifestPath = path.join(pluginRoot, '.claude-plugin', 'plugin.json');
+  const preToolPath = path.join(pluginRoot, 'scripts', 'pre_tool_use.js');
+  const postToolPath = path.join(pluginRoot, 'scripts', 'post_tool_use.js');
+  const postToolFailurePath = path.join(pluginRoot, 'scripts', 'post_tool_failure.js');
+  const postToolProbePath = path.join(pluginRoot, 'scripts', 'post_tool_probe.js');
+  const userSettingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+
+  console.log('TOKENLESS-DOCTOR/0.1');
+  console.log('');
+  okLine('node', process.version);
+  okLine('tokenless cli', __filename);
+  okLine('plugin root', pluginRoot);
+  okLine('CLAUDE_PLUGIN_ROOT', process.env.CLAUDE_PLUGIN_ROOT || '(not set)');
+  okLine('CLAUDE_PLUGIN_DATA', process.env.CLAUDE_PLUGIN_DATA || '(not set)');
+
+  checkReadableJson('plugin manifest', manifestPath);
+  checkReadableJson('hooks json', hooksPath);
+
+  for (const filePath of [preToolPath, postToolPath, postToolFailurePath, postToolProbePath]) {
+    if (fs.existsSync(filePath)) okLine('script exists', filePath);
+    else failLine('script exists', filePath);
+  }
+
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    const testPath = path.join(dataDir, '.tokenless-doctor-write-test');
+    fs.writeFileSync(testPath, 'ok\n', 'utf8');
+    fs.unlinkSync(testPath);
+    okLine('data dir writable', dataDir);
+  } catch (err) {
+    failLine('data dir writable', `${dataDir} (${err.message})`);
+  }
+
+  const sampleCommand = Buffer.from('npm run build', 'utf8').toString('base64');
+  const sampleRewrite = `node '${__filename.replace(/'/g, "'\\''")}' run --agent --data-dir '${dataDir.replace(/'/g, "'\\''")}' --cmd-b64 '${sampleCommand}'`;
+  okLine('sample PreToolUse rewrite', sampleRewrite);
+
+  if (fs.existsSync(userSettingsPath)) {
+    try {
+      const userSettings = JSON.parse(fs.readFileSync(userSettingsPath, 'utf8'));
+      const status = getHookInstallStatus(userSettings);
+      okLine('user settings readable', userSettingsPath);
+      okLine('user hooks installed', status.installed ? 'yes' : 'no');
+    } catch (err) {
+      failLine('user settings readable', `${userSettingsPath} (${err.message})`);
+    }
+  } else {
+    failLine('user settings readable', `${userSettingsPath} (not found)`);
+  }
+
+  const stale = [];
+  for (const settingsPath of candidateSettingsPaths()) {
+    if (!fs.existsSync(settingsPath)) continue;
+    try {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      stale.push(...findStaleTokenlessHooks(settings, settingsPath, pluginRoot));
+    } catch (err) {
+      failLine('stale hook scan', `${settingsPath} (${err.message})`);
+    }
+  }
+
+  if (!stale.length) {
+    okLine('stale Tokenless/ACC hooks', 'none');
+  } else {
+    for (const item of stale) {
+      failLine('stale Tokenless/ACC hook', `${item.settings} ${item.hook}:${item.matcher}`);
+    }
+    console.log('repair: tokenless repair-hooks --user --project');
+  }
+}
+
+function resolveArtifactId(artifactId, dataDir) {
+  if (artifactId !== 'latest') {
+    return artifactId;
+  }
+
+  const latest = listArtifacts(dataDir)[0];
+  if (!latest) {
+    console.error(`no artifacts found in ${dataDir}`);
+    process.exit(1);
+  }
+
+  return latest.artifact_id;
+}
+
+function printArtifactSummary(meta, index) {
+  const prefix = index == null ? '' : `${String(index + 1).padStart(2, '0')}. `;
+  process.stdout.write(`${prefix}${meta.artifact_id}  ${meta.status || 'unknown'}  ${meta.reducer || 'unknown'}  ${meta.created_at || 'unknown'}\n`);
+  process.stdout.write(`    command: ${String(meta.command || '').slice(0, 180)}\n`);
+}
+
+function parseDurationMs(value) {
+  if (!value) return null;
+  const match = /^(\d+)(m|h|d)$/i.exec(String(value).trim());
+  if (!match) {
+    throw new Error(`invalid duration: ${value}. Use forms like 60m, 24h, or 7d.`);
+  }
+
+  const amount = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  if (unit === 'm') return amount * 60 * 1000;
+  if (unit === 'h') return amount * 60 * 60 * 1000;
+  return amount * 24 * 60 * 60 * 1000;
+}
+
+function printHooks(dataDir) {
+  const pluginRoot = path.resolve(__dirname, '..');
+  const hooks = buildHooksObject(pluginRoot);
+
+  console.log('TOKENLESS-HOOKS/0.1');
+  console.log(`data_dir: ${dataDir}`);
+  console.log('');
+  console.log(JSON.stringify(hooks, null, 2));
+}
+
+function buildHooksObject(pluginRoot) {
+  return {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: 'Bash',
+          hooks: [
+            {
+              type: 'command',
+              command: `node "${path.join(pluginRoot, 'scripts', 'pre_tool_use.js')}"`
+            }
+          ]
+        },
+        {
+          matcher: 'Read',
+          hooks: [
+            {
+              type: 'command',
+              command: `node "${path.join(pluginRoot, 'scripts', 'pre_tool_use.js')}"`
+            }
+          ]
+        },
+        {
+          matcher: 'Edit',
+          hooks: [
+            {
+              type: 'command',
+              command: `node "${path.join(pluginRoot, 'scripts', 'pre_tool_use.js')}"`
+            }
+          ]
+        },
+        {
+          matcher: 'MultiEdit',
+          hooks: [
+            {
+              type: 'command',
+              command: `node "${path.join(pluginRoot, 'scripts', 'pre_tool_use.js')}"`
+            }
+          ]
+        },
+        {
+          matcher: 'Write',
+          hooks: [
+            {
+              type: 'command',
+              command: `node "${path.join(pluginRoot, 'scripts', 'pre_tool_use.js')}"`
+            }
+          ]
+        }
+      ],
+      PostToolUse: [
+        {
+          matcher: '*',
+          hooks: [
+            {
+              type: 'command',
+              command: `node "${path.join(pluginRoot, 'scripts', 'post_tool_use.js')}"`
+            }
+          ]
+        },
+        {
+          matcher: 'Edit',
+          hooks: [
+            {
+              type: 'command',
+              command: `node "${path.join(pluginRoot, 'scripts', 'post_tool_probe.js')}"`
+            }
+          ]
+        },
+        {
+          matcher: 'MultiEdit',
+          hooks: [
+            {
+              type: 'command',
+              command: `node "${path.join(pluginRoot, 'scripts', 'post_tool_probe.js')}"`
+            }
+          ]
+        },
+        {
+          matcher: 'Write',
+          hooks: [
+            {
+              type: 'command',
+              command: `node "${path.join(pluginRoot, 'scripts', 'post_tool_probe.js')}"`
+            }
+          ]
+        }
+      ],
+      PostToolUseFailure: [
+        {
+          matcher: 'Bash',
+          hooks: [
+            {
+              type: 'command',
+              command: `node "${path.join(pluginRoot, 'scripts', 'post_tool_failure.js')}"`
+            }
+          ]
+        }
+      ]
+    }
+  };
+}
+
+function getSettingsPath(scope, settingsPath) {
+  if (settingsPath) return settingsPath;
+  if (scope === 'user') return path.join(os.homedir(), '.claude', 'settings.json');
+  if (scope === 'project') return path.join(process.cwd(), '.claude', 'settings.local.json');
+  return null;
+}
+
+function isTokenlessHookEntry(entry) {
+  const text = JSON.stringify(entry || {}).replace(/\\/g, '/');
+  return text.includes('/plugins/claude-code/scripts/pre_tool_use.js') ||
+    text.includes('/plugins/claude-code/scripts/post_tool_use.js') ||
+    text.includes('/plugins/claude-code/scripts/post_tool_failure.js') ||
+    text.includes('/plugins/claude-code/scripts/post_tool_probe.js');
+}
+
+function normalizePathForCompare(value) {
+  return path.resolve(String(value || '')).replace(/\\/g, '/');
+}
+
+function isStaleTokenlessHookEntry(entry, pluginRoot) {
+  const text = JSON.stringify(entry || {}).replace(/\\/g, '/');
+  if (!isTokenlessHookEntry(entry)) return false;
+  return !text.includes(normalizePathForCompare(pluginRoot));
+}
+
+function findStaleTokenlessHooks(settings, settingsPath, pluginRoot) {
+  const hooks = settings.hooks || {};
+  const stale = [];
+
+  for (const [hookName, hookList] of Object.entries(hooks)) {
+    if (!Array.isArray(hookList)) continue;
+    for (const entry of hookList) {
+      if (!isStaleTokenlessHookEntry(entry, pluginRoot)) continue;
+      stale.push({
+        settings: settingsPath,
+        hook: hookName,
+        matcher: entry && entry.matcher ? entry.matcher : '(none)',
+        command: JSON.stringify(entry)
+      });
+    }
+  }
+
+  return stale;
+}
+
+function removeStaleTokenlessHooks(settings, pluginRoot) {
+  const next = {
+    ...settings,
+    hooks: {
+      ...(settings.hooks || {})
+    }
+  };
+
+  let removed = 0;
+  for (const [hookName, hookList] of Object.entries(next.hooks)) {
+    if (!Array.isArray(hookList)) continue;
+    const kept = hookList.filter((entry) => {
+      const stale = isStaleTokenlessHookEntry(entry, pluginRoot);
+      if (stale) removed += 1;
+      return !stale;
+    });
+
+    if (kept.length) next.hooks[hookName] = kept;
+    else delete next.hooks[hookName];
+  }
+
+  return { settings: next, removed };
+}
+
+function candidateSettingsPaths() {
+  const paths = [
+    path.join(os.homedir(), '.claude', 'settings.json'),
+    path.join(process.cwd(), '.claude', 'settings.json'),
+    path.join(process.cwd(), '.claude', 'settings.local.json')
+  ];
+  return [...new Set(paths)];
+}
+
+function getHookInstallStatus(settings) {
+  const hooks = settings.hooks || {};
+  const postToolUse = Array.isArray(hooks.PostToolUse) ? hooks.PostToolUse : [];
+  const detail = {
+    'PreToolUse:Bash': (Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse : []).some((entry) => entry && entry.matcher === 'Bash' && isTokenlessHookEntry(entry)),
+    'PreToolUse:Read': (Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse : []).some((entry) => entry && entry.matcher === 'Read' && isTokenlessHookEntry(entry)),
+    'PreToolUse:Edit': (Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse : []).some((entry) => entry && entry.matcher === 'Edit' && isTokenlessHookEntry(entry)),
+    'PreToolUse:MultiEdit': (Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse : []).some((entry) => entry && entry.matcher === 'MultiEdit' && isTokenlessHookEntry(entry)),
+    'PreToolUse:Write': (Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse : []).some((entry) => entry && entry.matcher === 'Write' && isTokenlessHookEntry(entry)),
+    'PostToolUse:*': postToolUse.some((entry) => entry && entry.matcher === '*' && isTokenlessHookEntry(entry)),
+    'PostToolUse:Edit': postToolUse.some((entry) => entry && entry.matcher === 'Edit' && isTokenlessHookEntry(entry)),
+    'PostToolUse:MultiEdit': postToolUse.some((entry) => entry && entry.matcher === 'MultiEdit' && isTokenlessHookEntry(entry)),
+    'PostToolUse:Write': postToolUse.some((entry) => entry && entry.matcher === 'Write' && isTokenlessHookEntry(entry)),
+    PostToolUseFailure: (Array.isArray(hooks.PostToolUseFailure) ? hooks.PostToolUseFailure : []).some(isTokenlessHookEntry)
+  };
+  const expected = Object.keys(detail);
+
+  return {
+    installed: expected.every((hookName) => detail[hookName]),
+    detail
+  };
+}
+
+function mergeHookLists(existingList, incomingList) {
+  const out = Array.isArray(existingList) ? [...existingList] : [];
+  const seen = new Set(out.map((item) => JSON.stringify(item)));
+
+  for (const item of incomingList || []) {
+    const key = JSON.stringify(item);
+    if (seen.has(key)) continue;
+    out.push(item);
+    seen.add(key);
+  }
+
+  return out;
+}
+
+function mergeSettingsHooks(settings, incoming) {
+  const next = {
+    ...settings,
+    hooks: {
+      ...(settings.hooks || {})
+    }
+  };
+
+  for (const [hookName, hookList] of Object.entries(incoming.hooks || {})) {
+    next.hooks[hookName] = mergeHookLists(next.hooks[hookName], hookList);
+  }
+
+  return next;
+}
+
+function redactSettingsForPrint(value) {
+  const cloned = JSON.parse(JSON.stringify(value || {}));
+  const env = cloned.env || {};
+
+  for (const key of Object.keys(env)) {
+    if (/(TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)/i.test(key)) {
+      env[key] = '[redacted]';
+    }
+  }
+
+  return cloned;
+}
+
+function installHooks({ scope, settingsPath, dryRun }) {
+  const pluginRoot = path.resolve(__dirname, '..');
+  const targetPath = getSettingsPath(scope, settingsPath);
+  const incoming = buildHooksObject(pluginRoot);
+
+  let existing = {};
+  if (fs.existsSync(targetPath)) {
+    existing = JSON.parse(fs.readFileSync(targetPath, 'utf8'));
+  }
+
+  const merged = mergeSettingsHooks(existing, incoming);
+
+  console.log('TOKENLESS-INSTALL-HOOKS/0.1');
+  console.log(`scope: ${scope || 'custom'}`);
+  console.log(`settings: ${targetPath}`);
+  console.log(`dry_run: ${dryRun ? 'yes' : 'no'}`);
+
+  if (dryRun) {
+    console.log('');
+    console.log(JSON.stringify(redactSettingsForPrint(merged), null, 2));
+    return;
+  }
+
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+
+  if (fs.existsSync(targetPath)) {
+    const backupPath = `${targetPath}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    fs.copyFileSync(targetPath, backupPath);
+    console.log(`backup: ${backupPath}`);
+  }
+
+  fs.writeFileSync(targetPath, `${JSON.stringify(merged, null, 2)}\n`, 'utf8');
+  console.log('installed: yes');
+  console.log(scope === 'user'
+    ? 'restart Claude Code to load the global hooks'
+    : 'restart Claude Code from this project directory to load the hooks');
+}
+
+function removeTokenlessHooks(settings) {
+  const next = {
+    ...settings,
+    hooks: {
+      ...(settings.hooks || {})
+    }
+  };
+
+  let removed = 0;
+  for (const [hookName, hookList] of Object.entries(next.hooks)) {
+    if (!Array.isArray(hookList)) continue;
+    const kept = hookList.filter((entry) => {
+      const shouldRemove = isTokenlessHookEntry(entry);
+      if (shouldRemove) removed += 1;
+      return !shouldRemove;
+    });
+
+    if (kept.length) {
+      next.hooks[hookName] = kept;
+    } else {
+      delete next.hooks[hookName];
+    }
+  }
+
+  return { settings: next, removed };
+}
+
+function uninstallHooks({ scope, settingsPath, dryRun }) {
+  const targetPath = getSettingsPath(scope, settingsPath);
+  console.log('TOKENLESS-UNINSTALL-HOOKS/0.1');
+  console.log(`scope: ${scope || 'custom'}`);
+  console.log(`settings: ${targetPath}`);
+  console.log(`dry_run: ${dryRun ? 'yes' : 'no'}`);
+
+  if (!fs.existsSync(targetPath)) {
+    console.log('installed: no');
+    console.log('removed: 0');
+    return;
+  }
+
+  const existing = JSON.parse(fs.readFileSync(targetPath, 'utf8'));
+  const result = removeTokenlessHooks(existing);
+  console.log(`removed: ${result.removed}`);
+
+  if (dryRun) {
+    console.log('');
+    console.log(JSON.stringify(redactSettingsForPrint(result.settings), null, 2));
+    return;
+  }
+
+  const backupPath = `${targetPath}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  fs.copyFileSync(targetPath, backupPath);
+  fs.writeFileSync(targetPath, `${JSON.stringify(result.settings, null, 2)}\n`, 'utf8');
+  console.log(`backup: ${backupPath}`);
+  console.log('uninstalled: yes');
+  console.log('restart Claude Code to apply the change');
+}
+
+function writeSettingsWithBackup(targetPath, settings, dryRun) {
+  if (dryRun) {
+    console.log(JSON.stringify(redactSettingsForPrint(settings), null, 2));
+    return;
+  }
+
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  if (fs.existsSync(targetPath)) {
+    const backupPath = `${targetPath}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    fs.copyFileSync(targetPath, backupPath);
+    console.log(`backup: ${backupPath}`);
+  }
+  fs.writeFileSync(targetPath, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
+}
+
+function repairHooks({ user, project, dryRun }) {
+  const pluginRoot = path.resolve(__dirname, '..');
+  const userPath = getSettingsPath('user');
+  const projectPath = getSettingsPath('project');
+  const targets = [];
+
+  if (user) targets.push({ scope: 'user', path: userPath, installCurrent: true });
+  if (project) targets.push({ scope: 'project', path: projectPath, installCurrent: false });
+  if (!targets.length) targets.push({ scope: 'user', path: userPath, installCurrent: true });
+
+  console.log('TOKENLESS-REPAIR-HOOKS/0.1');
+  console.log(`dry_run: ${dryRun ? 'yes' : 'no'}`);
+
+  for (const target of targets) {
+    let existing = {};
+    if (fs.existsSync(target.path)) {
+      existing = JSON.parse(fs.readFileSync(target.path, 'utf8'));
+    }
+
+    const staleBefore = findStaleTokenlessHooks(existing, target.path, pluginRoot);
+    let repaired = removeStaleTokenlessHooks(existing, pluginRoot).settings;
+    const removed = staleBefore.length;
+
+    if (target.installCurrent) {
+      repaired = mergeSettingsHooks(repaired, buildHooksObject(pluginRoot));
+    }
+
+    console.log('');
+    console.log(`scope: ${target.scope}`);
+    console.log(`settings: ${target.path}`);
+    console.log(`stale_removed: ${removed}`);
+    console.log(`installed_current: ${target.installCurrent ? 'yes' : 'no'}`);
+
+    writeSettingsWithBackup(target.path, repaired, dryRun);
+  }
+
+  console.log('');
+  console.log('restart Claude Code to apply repaired hooks');
+}
+
+function getSlashCommandsDir(options = {}) {
+  if (options.commandsDir) return options.commandsDir;
+  return path.join(os.homedir(), '.claude', 'commands');
+}
+
+function buildSlashCommands({ cliPath, dataDir }) {
+  const cli = shellQuote(cliPath);
+  const dir = shellQuote(dataDir);
+
+  return {
+    'tokenless.md': [
+      '---',
+      'description: Show Tokenless local compression savings and latest artifact',
+      'allowed-tools: Bash',
+      '---',
+      '',
+      'Show local Tokenless status, compression savings, and latest artifact.',
+      '',
+      'Run these commands:',
+      '',
+      `1. \`node ${cli} stats --data-dir ${dir}\``,
+      `2. \`node ${cli} latest --data-dir ${dir}\``,
+      `3. \`node ${cli} status --user\``,
+      `4. \`node ${cli} api-usage --since 24h\``,
+      `5. \`node ${cli} api-probe stats --dir ${shellQuote(path.join(os.homedir(), '.tokenless', 'api-bodies-realtest'))} --data-dir ${dir}\``,
+      '',
+      'Then answer compactly in this shape:',
+      '',
+      '```text',
+      'Tokenless:',
+      '- hooks: installed|not installed',
+      '- calls: <n>',
+      '- local_saved: <tokens_saved> tokens (hook-local before -> after; good for product/demo)',
+      '- local_ratio: <compression_ratio>',
+      '- source: hook=<calls/saved>, eval=<calls/saved>, smoke=<calls/saved>',
+      '- real_hook: <hook calls and saved tokens>',
+      '- api_confirmed: unique_artifacts=<n>, unique_saved=<n>, request_saved_estimate=<n>, caveat=not billing',
+      '- api_evidence: request_tokens=<n>, read_packet=<request matches>, edit_packet=<request matches>, raw_edit_payload=<request matches>',
+      '- read_packet: <read-packet calls and saved tokens if present; API-confirmed when request matches exist>',
+      '- edit_packet: <edit-packet calls and saved tokens if present; hook-local unless API request matches exist>',
+      '- write_packet: <write-packet calls and saved tokens if present; hook-local unless API request matches exist>',
+      '- gates: pending=<n>, packet_index=<n>',
+      '- api_24h: <total_tokens> tokens',
+      '- latest: <artifact_id or none>',
+      '- expand: <exact expand command if latest exists>',
+      '```',
+      '',
+      'Do not expand raw artifacts unless the user asks for details.'
+    ].join('\n'),
+    'tokenless-mode.md': [
+      '---',
+      'description: Configure Tokenless output discipline mode (reserved)',
+      'argument-hint: "[terse|caveman|reviewer|wenyan|off]"',
+      'allowed-tools: Bash',
+      '---',
+      '',
+      'Tokenless output discipline modes are reserved for a future release.',
+      '',
+      'For now, do not write settings or change behavior. Explain briefly:',
+      '',
+      '```text',
+      'Tokenless mode switching is not implemented yet.',
+      'Planned modes: terse, caveman, reviewer, wenyan, off.',
+      'Current command is a placeholder so the UI surface is stable.',
+      '```'
+    ].join('\n')
+  };
+}
+
+function installSlashCommands({ dataDir, commandsDir, dryRun }) {
+  const targetDir = getSlashCommandsDir({ commandsDir });
+  const commands = buildSlashCommands({ cliPath: __filename, dataDir });
+
+  console.log('TOKENLESS-INSTALL-COMMANDS/0.1');
+  console.log('scope: user');
+  console.log(`commands_dir: ${targetDir}`);
+  console.log(`data_dir: ${dataDir}`);
+  console.log(`dry_run: ${dryRun ? 'yes' : 'no'}`);
+
+  for (const [fileName, content] of Object.entries(commands)) {
+    const targetPath = path.join(targetDir, fileName);
+    console.log(`${dryRun ? 'would install' : 'install'}: /${path.basename(fileName, '.md')} -> ${targetPath}`);
+
+    if (dryRun) {
+      continue;
+    }
+
+    fs.mkdirSync(targetDir, { recursive: true });
+    if (fs.existsSync(targetPath)) {
+      const backupPath = `${targetPath}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+      fs.copyFileSync(targetPath, backupPath);
+      console.log(`backup: ${backupPath}`);
+    }
+    fs.writeFileSync(targetPath, `${content}\n`, 'utf8');
+  }
+
+  if (!dryRun) {
+    console.log('installed: yes');
+    console.log('restart Claude Code to load /tokenless and /tokenless-mode');
+  }
+}
+
+function uninstallSlashCommands({ commandsDir, dryRun }) {
+  const targetDir = getSlashCommandsDir({ commandsDir });
+  const files = ['tokenless.md', 'tokenless-mode.md'];
+
+  console.log('TOKENLESS-UNINSTALL-COMMANDS/0.1');
+  console.log('scope: user');
+  console.log(`commands_dir: ${targetDir}`);
+  console.log(`dry_run: ${dryRun ? 'yes' : 'no'}`);
+
+  for (const fileName of files) {
+    const targetPath = path.join(targetDir, fileName);
+    if (!fs.existsSync(targetPath)) {
+      console.log(`missing: ${targetPath}`);
+      continue;
+    }
+    console.log(`${dryRun ? 'would remove' : 'remove'}: ${targetPath}`);
+    if (!dryRun) {
+      fs.rmSync(targetPath, { force: true });
+    }
+  }
+
+  if (!dryRun) {
+    console.log('uninstalled: yes');
+    console.log('restart Claude Code to apply the change');
+  }
+}
+
+function printStatus({ scope, settingsPath }) {
+  const targetPath = getSettingsPath(scope, settingsPath);
+  console.log('TOKENLESS-STATUS/0.1');
+  console.log(`scope: ${scope || 'custom'}`);
+  console.log(`settings: ${targetPath}`);
+  console.log(`settings_exists: ${fs.existsSync(targetPath) ? 'yes' : 'no'}`);
+
+  if (!fs.existsSync(targetPath)) {
+    console.log('installed: no');
+    return;
+  }
+
+  const settings = JSON.parse(fs.readFileSync(targetPath, 'utf8'));
+  const status = getHookInstallStatus(settings);
+  console.log(`installed: ${status.installed ? 'yes' : 'no'}`);
+  for (const [hookName, installed] of Object.entries(status.detail)) {
+    console.log(`${hookName}: ${installed ? 'yes' : 'no'}`);
+  }
+}
+
+function cleanArtifacts({ dataDir, keep, olderThan, dryRun }) {
+  const artifacts = listArtifacts(dataDir);
+  const olderThanMs = parseDurationMs(olderThan);
+  const cutoff = olderThanMs == null ? null : Date.now() - olderThanMs;
+  const toDelete = [];
+
+  for (let i = 0; i < artifacts.length; i++) {
+    const artifact = artifacts[i];
+    const removeByKeep = keep != null && i >= keep;
+    const created = Date.parse(artifact.created_at || '');
+    const removeByAge = cutoff != null && Number.isFinite(created) && created < cutoff;
+
+    if (removeByKeep || removeByAge) {
+      toDelete.push({
+        artifact,
+        reason: removeByKeep && removeByAge ? 'keep+age' : (removeByKeep ? 'keep' : 'age')
+      });
+    }
+  }
+
+  console.log('TOKENLESS-CLEAN/0.1');
+  console.log(`data_dir: ${dataDir}`);
+  console.log(`artifacts: ${artifacts.length}`);
+  console.log(`delete: ${toDelete.length}`);
+  console.log(`dry_run: ${dryRun ? 'yes' : 'no'}`);
+
+  if (!toDelete.length) return;
+
+  const artifactRoot = path.join(path.resolve(dataDir), 'artifacts');
+  for (const item of toDelete) {
+    const artifactId = item.artifact.artifact_id;
+    console.log(`${dryRun ? 'would delete' : 'deleted'} ${artifactId} (${item.reason})`);
+    if (!dryRun) {
+      fs.rmSync(path.join(artifactRoot, artifactId), { recursive: true, force: true });
+    }
+  }
+}
+
+function commandContainsShellSyntax(parts) {
+  return parts.some((item) => ['&&', '||', ';', '|', '>', '<', '|&'].includes(item));
+}
+
+function normalizeCommandArgs(commandParts) {
+  const [command, ...rest] = commandParts;
+  if (!command) {
+    return { command, args: [], useShell: false, shellCommand: '' };
+  }
+
+  // Special-case node -e / node -p style where script may include spaces that shell originally preserved.
+  const mergedRest = [...rest];
+  if ((command === 'node' || command === 'python' || command === 'python3') && mergedRest.length > 1 && mergedRest[0] === '-e') {
+    mergedRest[1] = mergedRest.slice(1).join(' ');
+    while (mergedRest.length > 2) {
+      mergedRest.pop();
+    }
+  }
+
+  if (commandContainsShellSyntax(mergedRest)) {
+    return {
+      command,
+      args: mergedRest,
+      useShell: true,
+      shellCommand: `${command} ${mergedRest.join(' ')}`
+    };
+  }
+
+  return { command, args: mergedRest, useShell: false, shellCommand: '' };
+}
+
+async function runCommand(parsed) {
+  const { command, args, useShell, shellCommand } = parsed;
+  return new Promise((resolve) => {
+    const child = spawn(
+      useShell ? shellCommand : command,
+      useShell ? [] : args,
+      {
+      shell: useShell,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on('error', (err) => {
+      stderr += `\n[tokenless-run:spawn-error] ${err.message}`;
+    });
+
+    child.on('close', (code) => {
+      resolve({ code, stdout, stderr, interrupted: false, isImage: false });
+    });
+  });
+}
+
+function showArtifact(artifactId, dataDir) {
+  const resolvedArtifactId = resolveArtifactId(artifactId, dataDir);
+  const artifact = readArtifact(dataDir, resolvedArtifactId);
+  if (!artifact) {
+    console.error(`artifact not found: ${resolvedArtifactId}`);
+    process.exit(1);
+  }
+
+  process.stdout.write(`artifact_id: ${artifact.meta.artifact_id}\n`);
+  process.stdout.write(`created_at: ${artifact.meta.created_at}\n`);
+  process.stdout.write(`command: ${artifact.meta.command}\n`);
+  process.stdout.write(`status: ${artifact.meta.status}\n`);
+  process.stdout.write(`cwd: ${artifact.meta.cwd}\n`);
+  process.stdout.write('--- RAW STDOUT ---\n');
+  process.stdout.write(artifact.stdout);
+  if (artifact.stdout && !artifact.stdout.endsWith('\n')) process.stdout.write('\n');
+  process.stdout.write('--- RAW STDERR ---\n');
+  process.stdout.write(artifact.stderr);
+  if (artifact.stderr && !artifact.stderr.endsWith('\n')) process.stdout.write('\n');
+}
+
+function expandArtifact(artifactId, keyword, dataDir) {
+  const resolvedArtifactId = resolveArtifactId(artifactId, dataDir);
+  const artifact = readArtifact(dataDir, resolvedArtifactId);
+  if (!artifact) {
+    console.error(`artifact not found: ${resolvedArtifactId}`);
+    process.exit(1);
+  }
+
+  if (!keyword) {
+    console.error('missing --around keyword');
+    process.exit(1);
+  }
+
+  const expanded = expandArtifactAround(artifact, keyword);
+  process.stdout.write(expanded || 'No matching lines\n');
+}
+
+function expandArtifactByLines(artifactId, lines, dataDir) {
+  const resolvedArtifactId = resolveArtifactId(artifactId, dataDir);
+  const artifact = readArtifact(dataDir, resolvedArtifactId);
+  if (!artifact) {
+    console.error(`artifact not found: ${resolvedArtifactId}`);
+    process.exit(1);
+  }
+
+  if (!lines) {
+    console.error('missing --lines range');
+    process.exit(1);
+  }
+
+  const expanded = expandArtifactLines(artifact, lines);
+  process.stdout.write(expanded || 'No matching lines\n');
+}
+
+function formatPercent(numerator, denominator) {
+  if (!denominator) return '0%';
+  return `${((numerator / denominator) * 100).toFixed(1).replace(/\.0$/, '')}%`;
+}
+
+function printStats(dataDir) {
+  const entries = readStatsEntries(dataDir);
+  const summary = summarizeStats(entries);
+  const observations = readObservationEntries(dataDir);
+  const observedSummary = summarizeObservations(observations);
+  const compressionRatio = formatPercent(summary.tokens_after, summary.tokens_before);
+  const savedRatio = formatPercent(summary.tokens_saved, summary.tokens_before);
+
+  console.log('TOKENLESS-STATS/0.1');
+  console.log(`data_dir: ${dataDir}`);
+  console.log('measurement_scope: local_hook_boundary');
+  console.log('measurement_note: before/after is local compression delta; use api-probe stats for API-confirmed evidence');
+  console.log(`calls: ${summary.calls}`);
+  console.log(`success: ${summary.success}`);
+  console.log(`failed: ${summary.failed}`);
+  console.log(`tokens_before: ${summary.tokens_before}`);
+  console.log(`tokens_after: ${summary.tokens_after}`);
+  console.log(`tokens_saved: ${summary.tokens_saved}`);
+  console.log(`local_tokens_before: ${summary.tokens_before}`);
+  console.log(`local_tokens_after: ${summary.tokens_after}`);
+  console.log(`local_tokens_saved: ${summary.tokens_saved}`);
+  console.log(`compression_ratio: ${compressionRatio}`);
+  console.log(`saved_ratio: ${savedRatio}`);
+  console.log(`bytes_stdout: ${summary.bytes_stdout}`);
+  console.log(`bytes_stderr: ${summary.bytes_stderr}`);
+  console.log('');
+  console.log('By reducer:');
+
+  const reducers = Object.entries(summary.by_reducer).sort((a, b) => {
+    return b[1].tokens_saved - a[1].tokens_saved;
+  });
+
+  if (!reducers.length) {
+    console.log('- (none)');
+  } else {
+    for (const [reducer, item] of reducers) {
+      console.log(`- ${reducer}: calls=${item.calls}, before=${item.tokens_before}, after=${item.tokens_after}, saved=${item.tokens_saved}, ratio=${formatPercent(item.tokens_after, item.tokens_before)}`);
+    }
+  }
+
+  console.log('');
+  console.log('By source:');
+  const sources = Object.entries(summary.by_source || {}).sort((a, b) => {
+    return b[1].tokens_saved - a[1].tokens_saved;
+  });
+
+  if (!sources.length) {
+    console.log('- (none)');
+  } else {
+    for (const [source, item] of sources) {
+      console.log(`- ${source}: calls=${item.calls}, before=${item.tokens_before}, after=${item.tokens_after}, saved=${item.tokens_saved}, ratio=${formatPercent(item.tokens_after, item.tokens_before)}`);
+    }
+  }
+
+  const realHook = (summary.by_source || {}).hook;
+  console.log('');
+  console.log('Real hook savings:');
+  if (realHook) {
+    console.log(`- calls: ${realHook.calls}`);
+    console.log(`- tokens_before: ${realHook.tokens_before}`);
+    console.log(`- tokens_after: ${realHook.tokens_after}`);
+    console.log(`- tokens_saved: ${realHook.tokens_saved}`);
+    console.log(`- ratio: ${formatPercent(realHook.tokens_after, realHook.tokens_before)}`);
+  } else {
+    console.log('- (none)');
+  }
+
+  const readPacket = summary.by_reducer['read-packet'];
+  const editPacket = summary.by_reducer['edit-packet'];
+  const writePacket = summary.by_reducer['write-packet'];
+  console.log('');
+  console.log('Read packet savings:');
+  if (readPacket) {
+    console.log(`- calls: ${readPacket.calls}`);
+    console.log(`- tokens_before: ${readPacket.tokens_before}`);
+    console.log(`- tokens_after: ${readPacket.tokens_after}`);
+    console.log(`- tokens_saved: ${readPacket.tokens_saved}`);
+    console.log(`- ratio: ${formatPercent(readPacket.tokens_after, readPacket.tokens_before)}`);
+  } else {
+    console.log('- (none)');
+  }
+
+  console.log('');
+  console.log('Edit/Write packet savings:');
+  if (editPacket) {
+    console.log(`- edit-packet: calls=${editPacket.calls}, before=${editPacket.tokens_before}, after=${editPacket.tokens_after}, saved=${editPacket.tokens_saved}, ratio=${formatPercent(editPacket.tokens_after, editPacket.tokens_before)}`);
+  } else {
+    console.log('- edit-packet: (none)');
+  }
+  if (writePacket) {
+    console.log(`- write-packet: calls=${writePacket.calls}, before=${writePacket.tokens_before}, after=${writePacket.tokens_after}, saved=${writePacket.tokens_saved}, ratio=${formatPercent(writePacket.tokens_after, writePacket.tokens_before)}`);
+  } else {
+    console.log('- write-packet: (none)');
+  }
+
+  const recent = entries.slice(-5).reverse();
+  console.log('');
+  console.log('Recent:');
+  if (!recent.length) {
+    console.log('- (none)');
+  } else {
+    for (const entry of recent) {
+      const before = Number(entry.tokens_before) || 0;
+      const after = Number(entry.tokens_after) || 0;
+      const saved = Number(entry.tokens_saved) || (before - after);
+      const source = normalizeStatsSource(entry.source || 'legacy');
+      console.log(`- ${entry.artifact_id}: [${source}] ${entry.status || 'unknown'} ${entry.reducer || 'unknown'} ${before}->${after} saved=${saved}`);
+    }
+  }
+
+  const gates = listReadGates(dataDir);
+  const packets = listReadPackets(dataDir);
+  console.log('');
+  console.log('Large read gates:');
+  console.log(`- pending: ${gates.length}`);
+  if (gates.length) {
+    for (const gate of gates.slice(0, 5)) {
+      console.log(`- ${gate.file_path}: estimated=${gate.estimated_tokens} reason=${gate.reason || 'unknown'}`);
+    }
+  }
+  console.log(`- packet_index: ${packets.length}`);
+  if (packets.length) {
+    for (const packet of packets.slice(-5).reverse()) {
+      console.log(`- ${packet.artifact_id || '(no artifact)'}: ${packet.file_path} tokens=${packet.estimated_tokens || 0}`);
+    }
+  }
+
+  console.log('');
+  console.log('Observed tool outputs:');
+  console.log(`- calls: ${observedSummary.calls}`);
+  console.log(`- large_outputs: ${observedSummary.large_outputs}`);
+  console.log(`- max_response_tokens: ${observedSummary.max_response_tokens}`);
+  const observedTools = Object.entries(observedSummary.by_tool).sort((a, b) => b[1].calls - a[1].calls);
+  if (!observedTools.length) {
+    console.log('- by_tool: (none)');
+  } else {
+    for (const [tool, item] of observedTools) {
+      console.log(`- ${tool}: calls=${item.calls}, large=${item.large_outputs}, response_tokens=${item.response_tokens}, max_response=${item.max_response_tokens}`);
+    }
+  }
+}
+
+function parseDurationToMs(value) {
+  if (!value) return null;
+  const match = String(value).trim().match(/^(\d+)(m|h|d)$/i);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  if (unit === 'm') return amount * 60 * 1000;
+  if (unit === 'h') return amount * 60 * 60 * 1000;
+  return amount * 24 * 60 * 60 * 1000;
+}
+
+function walkFiles(root, predicate) {
+  const out = [];
+  if (!fs.existsSync(root)) return out;
+  const stack = [root];
+
+  while (stack.length) {
+    const current = stack.pop();
+    let stat;
+    try {
+      stat = fs.statSync(current);
+    } catch (err) {
+      continue;
+    }
+
+    if (stat.isDirectory()) {
+      let entries = [];
+      try {
+        entries = fs.readdirSync(current);
+      } catch (err) {
+        continue;
+      }
+      for (const entry of entries) {
+        stack.push(path.join(current, entry));
+      }
+      continue;
+    }
+
+    if (!stat.isFile()) continue;
+    if (!predicate || predicate(current)) out.push(current);
+  }
+
+  return out;
+}
+
+function getEventTimeMs(value) {
+  const candidates = [
+    value && value.timestamp,
+    value && value.created_at,
+    value && value.createdAt,
+    value && value.message && value.message.created_at,
+    value && value.message && value.message.timestamp
+  ].filter(Boolean);
+
+  for (const item of candidates) {
+    const parsed = Date.parse(item);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function getModelName(value) {
+  return (value && (value.model || (value.message && value.message.model))) || 'unknown';
+}
+
+function hasUsageShape(value) {
+  return value && typeof value === 'object' && (
+    Object.prototype.hasOwnProperty.call(value, 'input_tokens') ||
+    Object.prototype.hasOwnProperty.call(value, 'output_tokens') ||
+    Object.prototype.hasOwnProperty.call(value, 'cache_creation_input_tokens') ||
+    Object.prototype.hasOwnProperty.call(value, 'cache_read_input_tokens') ||
+    Object.prototype.hasOwnProperty.call(value, 'cache_creation_tokens') ||
+    Object.prototype.hasOwnProperty.call(value, 'cache_read_tokens')
+  );
+}
+
+function normalizeUsage(value) {
+  return {
+    input_tokens: Number(value.input_tokens) || 0,
+    output_tokens: Number(value.output_tokens) || 0,
+    cache_creation_tokens: Number(value.cache_creation_input_tokens || value.cache_creation_tokens) || 0,
+    cache_read_tokens: Number(value.cache_read_input_tokens || value.cache_read_tokens) || 0
+  };
+}
+
+function collectUsageObjects(value, out = []) {
+  if (!value || typeof value !== 'object') return out;
+
+  if (hasUsageShape(value.usage)) {
+    out.push(value.usage);
+  }
+
+  if (hasUsageShape(value)) {
+    out.push(value);
+    return out;
+  }
+
+  for (const child of Object.values(value)) {
+    if (child && typeof child === 'object') collectUsageObjects(child, out);
+  }
+
+  return out;
+}
+
+function findLatestFile(root) {
+  const files = walkFiles(root);
+  let latest = null;
+
+  for (const filePath of files) {
+    let stat;
+    try {
+      stat = fs.statSync(filePath);
+    } catch (err) {
+      continue;
+    }
+    if (!latest || stat.mtimeMs > latest.mtimeMs) {
+      latest = { filePath, mtimeMs: stat.mtimeMs, size: stat.size };
+    }
+  }
+
+  return latest;
+}
+
+function summarizeJsonShape(value, depth = 0, seen = new Set()) {
+  if (value == null) return String(value);
+  if (typeof value !== 'object') return typeof value;
+  if (seen.has(value)) return '[Circular]';
+  if (depth >= 3) return Array.isArray(value) ? `Array(${value.length})` : `Object(${Object.keys(value).length})`;
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    const sample = value.length ? summarizeJsonShape(value[0], depth + 1, seen) : 'empty';
+    return `Array(${value.length})<${sample}>`;
+  }
+
+  const entries = Object.entries(value).slice(0, 20).map(([key, child]) => {
+    return `${key}: ${summarizeJsonShape(child, depth + 1, seen)}`;
+  });
+  return `{ ${entries.join(', ')}${Object.keys(value).length > 20 ? ', ...' : ''} }`;
+}
+
+function collectMessageStats(value) {
+  const stats = {
+    arrays_named_messages: 0,
+    message_items: 0,
+    roles: {},
+    largest_string_chars: 0,
+    largest_string_path: null
+  };
+
+  function visit(node, pathParts = []) {
+    if (typeof node === 'string') {
+      if (node.length > stats.largest_string_chars) {
+        stats.largest_string_chars = node.length;
+        stats.largest_string_path = pathParts.join('.');
+      }
+      return;
+    }
+    if (!node || typeof node !== 'object') return;
+
+    if (Array.isArray(node)) {
+      if (pathParts[pathParts.length - 1] === 'messages') {
+        stats.arrays_named_messages += 1;
+        stats.message_items += node.length;
+      }
+      node.forEach((item, index) => visit(item, [...pathParts, String(index)]));
+      return;
+    }
+
+    if (typeof node.role === 'string') {
+      stats.roles[node.role] = (stats.roles[node.role] || 0) + 1;
+    }
+
+    for (const [key, child] of Object.entries(node)) {
+      visit(child, [...pathParts, key]);
+    }
+  }
+
+  visit(value);
+  return stats;
+}
+
+function findKeywordSnippet(text, keyword) {
+  if (!keyword) return null;
+  const index = text.indexOf(keyword);
+  if (index < 0) return null;
+  const start = Math.max(0, index - 160);
+  const end = Math.min(text.length, index + keyword.length + 160);
+  return text.slice(start, end)
+    .replace(/[A-Za-z0-9+/=]{40,}/g, '[long-token-redacted]')
+    .replace(/(sk-ant-[A-Za-z0-9_-]+)/g, '[api-key-redacted]');
+}
+
+function classifyApiProbeFile(filePath) {
+  const name = path.basename(filePath).toLowerCase();
+  if (name.includes('request')) return 'request';
+  if (name.includes('response')) return 'response';
+  return 'other';
+}
+
+function makeApiProbeBucket() {
+  return {
+    files: 0,
+    bytes: 0,
+    estimated_tokens: 0,
+    largest: []
+  };
+}
+
+function addLargestApiProbeFile(bucket, item) {
+  bucket.largest.push(item);
+  bucket.largest.sort((a, b) => b.estimated_tokens - a.estimated_tokens);
+  bucket.largest = bucket.largest.slice(0, 8);
+}
+
+function countKeywordInText(text, keyword) {
+  if (!keyword) return 0;
+  return String(text || '').split(keyword).length - 1;
+}
+
+function extractArtifactIds(text) {
+  return Array.from(new Set(String(text || '').match(/ctx_\d{8}_\d{6}_[a-z0-9]+/g) || []));
+}
+
+function makeConfirmedSavingsBucket() {
+  return {
+    artifacts: 0,
+    request_appearances: 0,
+    unique_saved_tokens: 0,
+    request_saved_estimate: 0
+  };
+}
+
+function addConfirmedSavings(summary, reducer, saved, appearances) {
+  if (!summary.by_reducer[reducer]) {
+    summary.by_reducer[reducer] = makeConfirmedSavingsBucket();
+  }
+  const bucket = summary.by_reducer[reducer];
+  bucket.artifacts += 1;
+  bucket.request_appearances += appearances;
+  bucket.unique_saved_tokens += saved;
+  bucket.request_saved_estimate += saved * appearances;
+}
+
+function summarizeApiConfirmedSavings({ requestArtifactFiles, dataDir }) {
+  const entries = readStatsEntries(dataDir);
+  const statsByArtifact = new Map();
+
+  for (const entry of entries) {
+    if (!entry || !entry.artifact_id) continue;
+    statsByArtifact.set(entry.artifact_id, entry);
+  }
+
+  const artifactRequestCounts = new Map();
+  for (const [artifactId, fileSet] of requestArtifactFiles.entries()) {
+    artifactRequestCounts.set(artifactId, fileSet.size);
+  }
+
+  const summary = {
+    data_dir: dataDir,
+    artifacts_observed_in_requests: artifactRequestCounts.size,
+    artifacts_with_local_stats: 0,
+    request_appearances: 0,
+    unique_saved_tokens: 0,
+    request_saved_estimate: 0,
+    by_reducer: {}
+  };
+
+  for (const [artifactId, appearances] of artifactRequestCounts.entries()) {
+    const entry = statsByArtifact.get(artifactId);
+    if (!entry) continue;
+    const before = Number(entry.tokens_before) || 0;
+    const after = Number(entry.tokens_after) || 0;
+    const saved = Number(entry.tokens_saved) || Math.max(0, before - after);
+    const reducer = entry.reducer || 'unknown';
+
+    summary.artifacts_with_local_stats += 1;
+    summary.request_appearances += appearances;
+    summary.unique_saved_tokens += saved;
+    summary.request_saved_estimate += saved * appearances;
+    addConfirmedSavings(summary, reducer, saved, appearances);
+  }
+
+  return summary;
+}
+
+function printApiProbeStats({ dir, dataDir }) {
+  const files = walkFiles(dir, (filePath) => filePath.endsWith('.json'));
+  const requestArtifactFiles = new Map();
+  const summary = {
+    all: makeApiProbeBucket(),
+    request: makeApiProbeBucket(),
+    response: makeApiProbeBucket(),
+    other: makeApiProbeBucket(),
+    keywords: {}
+  };
+  const keywords = [
+    'TOKENLESS-READ-PACKET',
+    'TOKENLESS-EDIT-PACKET',
+    'TOKENLESS-WRITE-PACKET',
+    'NEXT REQUIRED COMMAND',
+    'blocked before execution',
+    'stale',
+    'originalFile',
+    'structuredPatch',
+    'oldString',
+    'newString',
+    'tool_result'
+  ];
+
+  for (const keyword of keywords) {
+    summary.keywords[keyword] = {
+      request_matches: 0,
+      response_matches: 0,
+      other_matches: 0,
+      files_with_matches: 0
+    };
+  }
+
+  for (const filePath of files) {
+    let text = '';
+    let stat;
+    try {
+      stat = fs.statSync(filePath);
+      text = fs.readFileSync(filePath, 'utf8');
+    } catch (err) {
+      continue;
+    }
+
+    const kind = classifyApiProbeFile(filePath);
+    const tokens = estimateTokens(text);
+    const item = {
+      filePath,
+      bytes: stat.size,
+      estimated_tokens: tokens,
+      has_read_packet: text.includes('TOKENLESS-READ-PACKET'),
+      has_edit_packet: text.includes('TOKENLESS-EDIT-PACKET'),
+      has_write_packet: text.includes('TOKENLESS-WRITE-PACKET'),
+      has_raw_edit_payload: text.includes('originalFile') || text.includes('structuredPatch')
+    };
+
+    if (kind === 'request') {
+      for (const artifactId of extractArtifactIds(text)) {
+        if (!requestArtifactFiles.has(artifactId)) requestArtifactFiles.set(artifactId, new Set());
+        requestArtifactFiles.get(artifactId).add(filePath);
+      }
+    }
+
+    for (const bucket of [summary.all, summary[kind]]) {
+      bucket.files += 1;
+      bucket.bytes += stat.size;
+      bucket.estimated_tokens += tokens;
+      addLargestApiProbeFile(bucket, item);
+    }
+
+    for (const keyword of keywords) {
+      const count = countKeywordInText(text, keyword);
+      if (!count) continue;
+      summary.keywords[keyword].files_with_matches += 1;
+      if (kind === 'request') summary.keywords[keyword].request_matches += count;
+      else if (kind === 'response') summary.keywords[keyword].response_matches += count;
+      else summary.keywords[keyword].other_matches += count;
+    }
+  }
+
+  const confirmed = summarizeApiConfirmedSavings({ requestArtifactFiles, dataDir });
+
+  console.log('TOKENLESS-API-PROBE-STATS/0.1');
+  console.log(`dir: ${dir}`);
+  console.log(`data_dir: ${dataDir}`);
+  console.log(`files_scanned: ${files.length}`);
+  console.log('');
+  console.log('Estimated API body size:');
+  for (const name of ['request', 'response', 'other', 'all']) {
+    const bucket = summary[name];
+    console.log(`- ${name}: files=${bucket.files}, bytes=${bucket.bytes}, estimated_tokens=${bucket.estimated_tokens}`);
+  }
+  console.log('');
+  console.log('Packet evidence:');
+  for (const keyword of ['TOKENLESS-READ-PACKET', 'TOKENLESS-EDIT-PACKET', 'TOKENLESS-WRITE-PACKET', 'NEXT REQUIRED COMMAND', 'blocked before execution', 'stale']) {
+    const item = summary.keywords[keyword];
+    console.log(`- ${keyword}: request=${item.request_matches}, response=${item.response_matches}, other=${item.other_matches}, files=${item.files_with_matches}`);
+  }
+  console.log('');
+  console.log('Raw leak checks:');
+  for (const keyword of ['originalFile', 'structuredPatch', 'oldString', 'newString', 'tool_result']) {
+    const item = summary.keywords[keyword];
+    console.log(`- ${keyword}: request=${item.request_matches}, response=${item.response_matches}, other=${item.other_matches}, files=${item.files_with_matches}`);
+  }
+  console.log('');
+  console.log('API-confirmed savings estimate:');
+  console.log('- basis: artifact ids observed in API request bodies joined with local before/after stats');
+  console.log('- caveat: request_saved_estimate is request-body counterfactual, not exact billed-token savings');
+  console.log(`- artifacts_observed_in_requests: ${confirmed.artifacts_observed_in_requests}`);
+  console.log(`- artifacts_with_local_stats: ${confirmed.artifacts_with_local_stats}`);
+  console.log(`- request_appearances: ${confirmed.request_appearances}`);
+  console.log(`- unique_saved_tokens: ${confirmed.unique_saved_tokens}`);
+  console.log(`- request_saved_estimate: ${confirmed.request_saved_estimate}`);
+  console.log('- by_reducer:');
+  const confirmedReducers = Object.entries(confirmed.by_reducer).sort((a, b) => b[1].request_saved_estimate - a[1].request_saved_estimate);
+  if (!confirmedReducers.length) {
+    console.log('  - (none)');
+  } else {
+    for (const [reducer, item] of confirmedReducers) {
+      console.log(`  - ${reducer}: artifacts=${item.artifacts}, appearances=${item.request_appearances}, unique_saved=${item.unique_saved_tokens}, request_saved_estimate=${item.request_saved_estimate}`);
+    }
+  }
+  console.log('');
+  console.log('Largest request files:');
+  if (!summary.request.largest.length) {
+    console.log('- (none)');
+  } else {
+    for (const item of summary.request.largest) {
+      console.log(`- ${item.filePath}: tokens=${item.estimated_tokens}, read_packet=${item.has_read_packet ? 'yes' : 'no'}, edit_packet=${item.has_edit_packet ? 'yes' : 'no'}, write_packet=${item.has_write_packet ? 'yes' : 'no'}, raw_edit_payload=${item.has_raw_edit_payload ? 'yes' : 'no'}`);
+    }
+  }
+}
+
+function printApiUsage({ source, since }) {
+  const sinceMs = parseDurationToMs(since);
+  const cutoff = sinceMs == null ? null : Date.now() - sinceMs;
+  const files = walkFiles(source, (filePath) => filePath.endsWith('.jsonl'));
+  const summary = {
+    files_scanned: files.length,
+    rows_scanned: 0,
+    rows_with_usage: 0,
+    usage_events: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_creation_tokens: 0,
+    cache_read_tokens: 0,
+    total_tokens: 0,
+    latest_at: null,
+    by_model: {}
+  };
+
+  for (const filePath of files) {
+    let lines = [];
+    try {
+      lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/).filter(Boolean);
+    } catch (err) {
+      continue;
+    }
+
+    for (const line of lines) {
+      summary.rows_scanned += 1;
+      let row;
+      try {
+        row = JSON.parse(line);
+      } catch (err) {
+        continue;
+      }
+
+      const eventTime = getEventTimeMs(row);
+      if (cutoff != null && eventTime != null && eventTime < cutoff) continue;
+      if (eventTime != null && (!summary.latest_at || eventTime > Date.parse(summary.latest_at))) {
+        summary.latest_at = new Date(eventTime).toISOString();
+      }
+
+      const usages = collectUsageObjects(row);
+      if (!usages.length) continue;
+      summary.rows_with_usage += 1;
+      const model = getModelName(row);
+      if (!summary.by_model[model]) {
+        summary.by_model[model] = {
+          usage_events: 0,
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_creation_tokens: 0,
+          cache_read_tokens: 0,
+          total_tokens: 0
+        };
+      }
+
+      for (const usage of usages) {
+        const normalized = normalizeUsage(usage);
+        const total = normalized.input_tokens + normalized.output_tokens + normalized.cache_creation_tokens + normalized.cache_read_tokens;
+        summary.usage_events += 1;
+        summary.input_tokens += normalized.input_tokens;
+        summary.output_tokens += normalized.output_tokens;
+        summary.cache_creation_tokens += normalized.cache_creation_tokens;
+        summary.cache_read_tokens += normalized.cache_read_tokens;
+        summary.total_tokens += total;
+        summary.by_model[model].usage_events += 1;
+        summary.by_model[model].input_tokens += normalized.input_tokens;
+        summary.by_model[model].output_tokens += normalized.output_tokens;
+        summary.by_model[model].cache_creation_tokens += normalized.cache_creation_tokens;
+        summary.by_model[model].cache_read_tokens += normalized.cache_read_tokens;
+        summary.by_model[model].total_tokens += total;
+      }
+    }
+  }
+
+  console.log('TOKENLESS-API-USAGE/0.1');
+  console.log(`source: ${source}`);
+  console.log(`since: ${since || 'all'}`);
+  console.log(`files_scanned: ${summary.files_scanned}`);
+  console.log(`rows_scanned: ${summary.rows_scanned}`);
+  console.log(`rows_with_usage: ${summary.rows_with_usage}`);
+  console.log(`usage_events: ${summary.usage_events}`);
+  console.log(`input_tokens: ${summary.input_tokens}`);
+  console.log(`output_tokens: ${summary.output_tokens}`);
+  console.log(`cache_creation_tokens: ${summary.cache_creation_tokens}`);
+  console.log(`cache_read_tokens: ${summary.cache_read_tokens}`);
+  console.log(`total_tokens: ${summary.total_tokens}`);
+  console.log(`latest_at: ${summary.latest_at || 'unknown'}`);
+  console.log('');
+  console.log('By model:');
+  const models = Object.entries(summary.by_model).sort((a, b) => b[1].total_tokens - a[1].total_tokens);
+  if (!models.length) {
+    console.log('- (none)');
+  } else {
+    for (const [model, item] of models) {
+      console.log(`- ${model}: events=${item.usage_events}, total=${item.total_tokens}, input=${item.input_tokens}, output=${item.output_tokens}, cache_create=${item.cache_creation_tokens}, cache_read=${item.cache_read_tokens}`);
+    }
+  }
+}
+
+function printApiProbe({ action, dir, dataDir, keyword, showSnippet }) {
+  if (action === 'start') {
+    console.log('TOKENLESS-API-PROBE/0.1');
+    console.log('action: start');
+    console.log(`dir: ${dir}`);
+    console.log('');
+    console.log('Run these before starting Claude Code:');
+    console.log(`export CLAUDE_CODE_ENABLE_TELEMETRY=1`);
+    console.log(`export OTEL_LOG_RAW_API_BODIES=file:${dir}`);
+    console.log('');
+    console.log('Warning: raw API bodies can contain full prompts, tool outputs, and sensitive context. Use temporarily and keep local.');
+    return;
+  }
+
+  if (action === 'stop') {
+    console.log('TOKENLESS-API-PROBE/0.1');
+    console.log('action: stop');
+    console.log('');
+    console.log('Run these before starting Claude Code again:');
+    console.log('unset OTEL_LOG_RAW_API_BODIES');
+    console.log('unset CLAUDE_CODE_ENABLE_TELEMETRY');
+    return;
+  }
+
+  if (action === 'inspect') {
+    if (!keyword) {
+      console.error('tokenless api-probe inspect requires --keyword <text>');
+      process.exit(1);
+    }
+
+    const files = walkFiles(dir);
+    let filesWithMatches = 0;
+    let totalMatches = 0;
+    const samples = [];
+
+    for (const filePath of files) {
+      let text = '';
+      try {
+        text = fs.readFileSync(filePath, 'utf8');
+      } catch (err) {
+        continue;
+      }
+
+      const count = text.split(keyword).length - 1;
+      if (count <= 0) continue;
+      filesWithMatches += 1;
+      totalMatches += count;
+      if (samples.length < 10) {
+        samples.push({ filePath, count });
+      }
+    }
+
+    console.log('TOKENLESS-API-PROBE/0.1');
+    console.log('action: inspect');
+    console.log(`dir: ${dir}`);
+    console.log(`keyword: ${keyword}`);
+    console.log(`files_scanned: ${files.length}`);
+    console.log(`files_with_matches: ${filesWithMatches}`);
+    console.log(`matches: ${totalMatches}`);
+    console.log('');
+    console.log('Sample files:');
+    if (!samples.length) {
+      console.log('- (none)');
+    } else {
+      for (const item of samples) {
+        console.log(`- ${item.filePath}: ${item.count}`);
+      }
+    }
+    return;
+  }
+
+  if (action === 'latest') {
+    const latest = findLatestFile(dir);
+    console.log('TOKENLESS-API-PROBE/0.1');
+    console.log('action: latest');
+    console.log(`dir: ${dir}`);
+
+    if (!latest) {
+      console.log('file: (none)');
+      return;
+    }
+
+    let text = '';
+    try {
+      text = fs.readFileSync(latest.filePath, 'utf8');
+    } catch (err) {
+      console.log(`file: ${latest.filePath}`);
+      console.log(`read_error: ${err.message}`);
+      return;
+    }
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch (err) {
+      // Raw body logs may be JSONL or plain text depending on the exporter.
+    }
+
+    const keywordList = ['originalFile', 'structuredPatch', 'oldString', 'newString', 'tool_result', 'messages'];
+    if (keyword && !keywordList.includes(keyword)) keywordList.unshift(keyword);
+
+    console.log(`file: ${latest.filePath}`);
+    console.log(`bytes: ${latest.size}`);
+    console.log(`estimated_tokens: ${estimateTokens(text)}`);
+    console.log(`json: ${parsed ? 'yes' : 'no'}`);
+    console.log(`modified_at: ${new Date(latest.mtimeMs).toISOString()}`);
+    console.log('');
+
+    if (parsed) {
+      const usageObjects = collectUsageObjects(parsed).map(normalizeUsage);
+      const messageStats = collectMessageStats(parsed);
+      console.log('JSON shape:');
+      console.log(summarizeJsonShape(parsed));
+      console.log('');
+      console.log('Message stats:');
+      console.log(`- messages_arrays: ${messageStats.arrays_named_messages}`);
+      console.log(`- message_items: ${messageStats.message_items}`);
+      console.log(`- roles: ${JSON.stringify(messageStats.roles)}`);
+      console.log(`- largest_string_chars: ${messageStats.largest_string_chars}`);
+      console.log(`- largest_string_path: ${messageStats.largest_string_path || '(none)'}`);
+      console.log('');
+      console.log('Usage objects:');
+      if (!usageObjects.length) {
+        console.log('- (none)');
+      } else {
+        for (const item of usageObjects.slice(0, 10)) {
+          console.log(`- input=${item.input_tokens}, output=${item.output_tokens}, cache_create=${item.cache_creation_tokens}, cache_read=${item.cache_read_tokens}`);
+        }
+      }
+      console.log('');
+    }
+
+    console.log('Keyword matches:');
+    for (const item of keywordList) {
+      const count = text.split(item).length - 1;
+      console.log(`- ${item}: ${count}`);
+    }
+
+    if (showSnippet && keyword) {
+      console.log('');
+      console.log('Snippet:');
+      console.log(findKeywordSnippet(text, keyword) || '(keyword not found)');
+    } else {
+      console.log('');
+      console.log('Snippet: disabled. Re-run with --keyword <text> --show-snippet to print a short redacted snippet.');
+    }
+    return;
+  }
+
+  if (action === 'stats') {
+    printApiProbeStats({ dir, dataDir });
+    return;
+  }
+
+  console.log('Usage: tokenless api-probe start|stop|inspect|latest|stats [--dir <dir>] [--data-dir <dir>] [--keyword <text>] [--show-snippet]');
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+
+  if (args[0] === '--help' || args[0] === '-h') {
+    usage();
+    process.exit(0);
+  }
+
+  if (args.length === 0) {
+    usage();
+    process.exit(1);
+  }
+
+  const command = args[0];
+
+  if (command === 'run') {
+    const rest = args.slice(1);
+    const { agent, dataDir, commandParts, encodedCommand } = parseRunArgs(rest);
+
+    if (!encodedCommand && commandParts.length === 0) {
+      console.error('tokenless run missing command after --');
+      usage();
+      process.exit(1);
+    }
+
+    const commandText = encodedCommand || commandParts.join(' ');
+    const commandForRun = encodedCommand
+      ? { command: process.env.SHELL || '/bin/sh', args: ['-lc', encodedCommand], useShell: false, shellCommand: '' }
+      : normalizeCommandArgs(commandParts);
+    const result = await runCommand(commandForRun);
+    const beforeText = `${result.stdout}\n${result.stderr}`;
+    const outputReducer = getReducerForOutput({
+      command: commandText,
+      stdout: result.stdout,
+      stderr: result.stderr
+    });
+
+    if (agent && !isNoisyCommand(commandText) && outputReducer === 'bash_generic' && estimateTokens(beforeText) < 8000) {
+      if (result.stdout) process.stdout.write(result.stdout);
+      if (result.stderr) process.stderr.write(result.stderr);
+      process.exit(0);
+    }
+
+    const reducer = getReducerForOutput({
+      command: commandText,
+      stdout: result.stdout,
+      stderr: result.stderr
+    }) || (isNoisyCommand(commandText) ? 'bash_generic' : getReducerForCommand(commandText));
+
+    const compacted = compactOutput({
+      tool: 'Bash',
+      command: commandText,
+      exitCode: result.code,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      reducer,
+      dataDir,
+      beforeText: `${result.stdout}\n${result.stderr}`,
+      fromPost: false
+    });
+
+    const artifact = createArtifact({
+      dataDir,
+      command: commandText,
+      exitCode: result.code,
+      reducer,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      compactedText: compacted.text,
+      beforeTokens: compacted.beforeTokens,
+      afterTokens: compacted.afterTokens,
+      status: compacted.status,
+      source: process.env.TOKENLESS_STATS_SOURCE || (agent ? 'hook' : 'smoke')
+    });
+
+    const outputText = compacted.text.replace(
+      'tokenless show null',
+      formatArtifactPointer(artifact.artifact_id, {
+        accPath: __filename,
+        dataDir
+      })
+    );
+
+    console.log(outputText);
+    if (agent) {
+      process.exit(0);
+    }
+    process.exit(result.code || 0);
+    return;
+  }
+
+  if (command === 'read') {
+    const parsed = parseReadArgs(args.slice(1));
+    if (!parsed.filePath) {
+      console.error('tokenless read requires <file>');
+      process.exit(1);
+    }
+
+    let text;
+    try {
+      text = fs.readFileSync(parsed.filePath, 'utf8');
+    } catch (err) {
+      console.error(`failed to read ${parsed.filePath}: ${err.message}`);
+      process.exit(1);
+    }
+
+    const beforeTokens = estimateTokens(text);
+    if (!shouldCompactRead({ filePath: parsed.filePath, text, tokens: beforeTokens })) {
+      process.stdout.write(text);
+      process.exit(0);
+    }
+
+    const artifactId = formatArtifactId();
+    const packet = summarizeRead({
+      filePath: parsed.filePath,
+      text,
+      artifactId,
+      tokenlessPath: __filename,
+      dataDir: parsed.dataDir
+    });
+
+    const artifact = createArtifact({
+      dataDir: parsed.dataDir,
+      artifactId,
+      command: `Read ${parsed.filePath}`,
+      exitCode: 0,
+      reducer: 'read-packet',
+      stdout: text,
+      stderr: '',
+      compactedText: packet.text,
+      beforeTokens,
+      afterTokens: packet.afterTokens,
+      status: 'success',
+      source: process.env.TOKENLESS_STATS_SOURCE || (parsed.agent ? 'hook' : 'smoke')
+    });
+
+    clearReadGate({ dataDir: parsed.dataDir, filePath: parsed.filePath });
+    markReadPacket({
+      dataDir: parsed.dataDir,
+      filePath: parsed.filePath,
+      artifactId: artifact.artifact_id,
+      estimatedTokens: beforeTokens
+    });
+    process.stdout.write(packet.text.replace(`show ${artifactId}`, `show ${artifact.artifact_id}`));
+    process.exit(0);
+  }
+
+  if (command === 'compact') {
+    const parsed = parseCompactArgs(args.slice(1));
+    if (!parsed.stdin) {
+      console.error('tokenless compact requires --stdin');
+      process.exit(1);
+    }
+
+    const inputText = fs.readFileSync(0, 'utf8');
+    const reducer = parsed.reducer || getReducerForOutput({
+      command: parsed.commandLabel,
+      stdout: inputText,
+      stderr: ''
+    });
+
+    const compacted = compactOutput({
+      tool: 'stdin',
+      command: parsed.commandLabel,
+      exitCode: parsed.exitCode,
+      stdout: inputText,
+      stderr: '',
+      reducer,
+      dataDir: parsed.dataDir,
+      beforeText: inputText
+    });
+
+    const artifact = createArtifact({
+      dataDir: parsed.dataDir,
+      command: parsed.commandLabel,
+      exitCode: parsed.exitCode,
+      reducer,
+      stdout: inputText,
+      stderr: '',
+      compactedText: compacted.text,
+      beforeTokens: compacted.beforeTokens,
+      afterTokens: compacted.afterTokens,
+      status: compacted.status,
+      source: process.env.TOKENLESS_STATS_SOURCE || 'smoke'
+    });
+
+    console.log(compacted.text.replace(
+      'tokenless show null',
+      formatArtifactPointer(artifact.artifact_id, {
+        accPath: __filename,
+        dataDir: parsed.dataDir
+      })
+    ));
+    process.exit(0);
+  }
+
+  if (command === 'list') {
+    const parsed = parseListArgs(args.slice(1));
+    const artifacts = listArtifacts(parsed.dataDir).slice(0, parsed.limit);
+
+    console.log('TOKENLESS-ARTIFACTS/0.1');
+    console.log(`data_dir: ${parsed.dataDir}`);
+    console.log(`count: ${artifacts.length}`);
+    console.log('');
+
+    if (!artifacts.length) {
+      console.log('(no artifacts found)');
+      process.exit(0);
+    }
+
+    artifacts.forEach((meta, index) => printArtifactSummary(meta, index));
+    process.exit(0);
+  }
+
+  if (command === 'latest') {
+    const parsed = parseDoctorArgs(args.slice(1));
+    const latest = listArtifacts(parsed.dataDir)[0];
+    if (!latest) {
+      console.error(`no artifacts found in ${parsed.dataDir}`);
+      process.exit(1);
+    }
+
+    console.log('TOKENLESS-LATEST/0.1');
+    printArtifactSummary(latest, null);
+    console.log(`show: ${formatArtifactPointer(latest.artifact_id, { accPath: __filename, dataDir: parsed.dataDir })}`);
+    console.log(`expand: node '${__filename.replace(/'/g, "'\\''")}' expand ${latest.artifact_id} --around "<keyword>" --data-dir '${String(parsed.dataDir).replace(/'/g, "'\\''")}'`);
+    process.exit(0);
+  }
+
+  if (command === 'stats') {
+    const parsed = parseDoctorArgs(args.slice(1));
+    printStats(parsed.dataDir);
+    process.exit(0);
+  }
+
+  if (command === 'api-usage') {
+    const parsed = parseApiUsageArgs(args.slice(1));
+    printApiUsage(parsed);
+    process.exit(0);
+  }
+
+  if (command === 'api-probe') {
+    const parsed = parseApiProbeArgs(args.slice(1));
+    printApiProbe(parsed);
+    process.exit(0);
+  }
+
+  if (command === 'print-hooks') {
+    const parsed = parseDoctorArgs(args.slice(1));
+    printHooks(parsed.dataDir);
+    process.exit(0);
+  }
+
+  if (command === 'status') {
+    const parsed = parseSettingsScopeArgs(args.slice(1));
+    if (!['user', 'project'].includes(parsed.scope) && !parsed.settingsPath) {
+      console.error('tokenless status requires --user, --project, or --settings <path>');
+      process.exit(1);
+    }
+    printStatus(parsed);
+    process.exit(0);
+  }
+
+  if (command === 'install-hooks') {
+    const parsed = parseInstallHooksArgs(args.slice(1));
+    if (!['user', 'project'].includes(parsed.scope) && !parsed.settingsPath) {
+      console.error('tokenless install-hooks requires --user, --project, or --settings <path>');
+      process.exit(1);
+    }
+    installHooks(parsed);
+    process.exit(0);
+  }
+
+  if (command === 'uninstall-hooks') {
+    const parsed = parseSettingsScopeArgs(args.slice(1));
+    if (!['user', 'project'].includes(parsed.scope) && !parsed.settingsPath) {
+      console.error('tokenless uninstall-hooks requires --user, --project, or --settings <path>');
+      process.exit(1);
+    }
+    uninstallHooks(parsed);
+    process.exit(0);
+  }
+
+  if (command === 'repair-hooks') {
+    const flags = new Set(args.slice(1));
+    repairHooks({
+      user: flags.has('--user') || (!flags.has('--project')),
+      project: flags.has('--project'),
+      dryRun: flags.has('--dry-run')
+    });
+    process.exit(0);
+  }
+
+  if (command === 'install-commands') {
+    const parsed = parseSlashCommandArgs(args.slice(1));
+    installSlashCommands(parsed);
+    process.exit(0);
+  }
+
+  if (command === 'uninstall-commands') {
+    const parsed = parseSlashCommandArgs(args.slice(1));
+    uninstallSlashCommands(parsed);
+    process.exit(0);
+  }
+
+  if (command === 'clean') {
+    const parsed = parseCleanArgs(args.slice(1));
+    cleanArtifacts(parsed);
+    process.exit(0);
+  }
+
+  if (command === 'doctor') {
+    const parsed = parseDoctorArgs(args.slice(1));
+    runDoctor(parsed.dataDir);
+    process.exit(0);
+  }
+
+  if (command === 'show') {
+    const parsed = parseShowOrExpandArgs(args.slice(1));
+    const artifactId = parsed.positional[0];
+    if (!artifactId) {
+      console.error('tokenless show missing artifact_id');
+      process.exit(1);
+    }
+    showArtifact(artifactId, parsed.dataDir);
+    process.exit(0);
+  }
+
+  if (command === 'expand') {
+    const parsed = parseShowOrExpandArgs(args.slice(1));
+    const artifactId = parsed.positional[0];
+    if (!artifactId) {
+      console.error('tokenless expand missing artifact_id');
+      process.exit(1);
+    }
+    if (parsed.lines) {
+      expandArtifactByLines(artifactId, parsed.lines, parsed.dataDir);
+    } else {
+      expandArtifact(artifactId, parsed.around, parsed.dataDir);
+    }
+    process.exit(0);
+  }
+
+  usage();
+  process.exit(1);
+}
+
+main().catch((err) => {
+  console.error(err && err.message ? err.message : String(err));
+  process.exit(1);
+});

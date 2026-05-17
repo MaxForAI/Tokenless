@@ -169,7 +169,7 @@ function main() {
 
   const repoRoot = path.resolve(__dirname, '..');
   const accPath = path.join(repoRoot, 'plugins', 'claude-code', 'bin', 'acc');
-  const dataDir = path.join(os.tmpdir(), 'acc-complex-test-log');
+  const dataDir = path.join(os.tmpdir(), 'tokenless-complex-test-log');
   fs.rmSync(dataDir, { recursive: true, force: true });
 
   const rawPreview = spawnSync(process.execPath, [__filename, '--emit'], {

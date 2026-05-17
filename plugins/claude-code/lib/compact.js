@@ -59,7 +59,7 @@ function compactOutput({ tool, command, exitCode, stdout, stderr, reducer: reduc
     'Dropped:',
     ...(compacted.dropped.length ? compacted.dropped.map((item) => `- ${item}`) : ['- repeated/irrelevant lines']),
     '',
-    'Raw artifact: acc show null',
+    'Raw artifact: tokenless show null',
     ''
   ].join('\n');
 

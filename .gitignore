@@ -7,10 +7,12 @@ pnpm-debug.log*
 
 # ACC local data
 .acc/
+.tokenless/
 artifacts/
 
 # Claude Code local workspace settings
 .claude/settings.local.json
+.claude/*.bak*
 
 # Temporary eval output
 tmp/

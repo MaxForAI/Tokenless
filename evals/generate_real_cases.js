@@ -195,7 +195,7 @@ function createGitDiffCase(root) {
   const dir = path.join(root, 'git-diff-real');
   mkdirp(path.join(dir, 'src'));
   run('git init', dir);
-  run('git config user.email acc@example.test', dir);
+  run('git config user.email tokenless@example.test', dir);
   run('git config user.name Tokenless', dir);
   write(path.join(dir, 'src', 'parser.js'), [
     'function parse(input) {',
@@ -239,7 +239,7 @@ function createGitDiffLargeCase(root) {
   const dir = path.join(root, 'git-diff-large-real');
   mkdirp(path.join(dir, 'src'));
   run('git init', dir);
-  run('git config user.email acc@example.test', dir);
+  run('git config user.email tokenless@example.test', dir);
   run('git config user.name Tokenless', dir);
   write(path.join(dir, 'src', 'generated.js'), [
     'export const generated = [];',
@@ -392,7 +392,7 @@ function createFindLargeCase(root) {
 }
 
 function main() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acc-real-cases-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tokenless-real-cases-'));
   const definitions = [
     createNpmTestCase(root),
     createNpmTestLargeCase(root),

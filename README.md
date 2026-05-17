@@ -12,9 +12,11 @@ The current wire format is `TOKENLESS-PACKET/0.1`.
 - Build and CI logs: `npm run build`, `docker build`, `kubectl logs`
 - Diffs: `git diff`, `git log`
 - Search and tree output: `rg`, `grep -R`, `find`, `tree`, `ls -R`
+- Large low-risk reads: CSS, HTML, JSON, logs, docs, generated files
+- Large successful edit/write tool results: conservative `TOKENLESS-EDIT-PACKET` / `TOKENLESS-WRITE-PACKET`
 - Fallback compression for unexpectedly huge Bash output
 
-Small bounded commands such as `rg -m 20`, `find ... | head`, `cat file | grep`, and `tree | head` are allowed through directly.
+Small bounded commands such as `rg -m 20`, `find ... | head`, `cat file | grep`, and `tree | head` are allowed through directly. Small reads and source-code reads are not compressed by default.
 
 ## How it works
 
@@ -28,6 +30,69 @@ Claude wants to run a noisy command
 ```
 
 The raw output is still available through `tokenless show` and `tokenless expand`. The shorter `acc` command remains as a compatibility alias.
+
+## Read packets
+
+Tokenless can cap large low-risk `Read` outputs as `TOKENLESS-READ-PACKET/0.1`.
+
+Default policy:
+
+- Compress low-risk reads over roughly 4000 estimated tokens: CSS, HTML, JSON, logs, docs, lockfiles, generated files.
+- Do not compress small files.
+- Do not compress source files such as `.js`, `.ts`, `.py`, `.go`, `.rs` by default.
+
+Read packets are indexes, not edit evidence. If a model needs to modify exact code or style, it must expand the relevant lines first:
+
+```bash
+tokenless expand ctx_abc --around ".target-card" --data-dir ~/.tokenless
+tokenless expand ctx_abc --lines 520:535 --data-dir ~/.tokenless
+```
+
+For CSS/SCSS/Less and HTML/HTM/SVG files, read packets include a deterministic editable summary: CSS variables, color palette, likely editable selectors, media/animation rules, HTML sections, ids/classes, interactive elements, assets, and headings. Each section has fixed item limits and omitted counts; raw content remains available through artifacts.
+
+Large-file gate behavior:
+
+- For large low-risk files, Tokenless blocks raw `Read`, `grep`, `rg`, `sed`, `cat`, `head`, `tail`, `Edit`, `MultiEdit`, and `Write` access until a `TOKENLESS-READ-PACKET` exists.
+- The required next step is printed in the hook message, usually `tokenless read --agent --data-dir ~/.tokenless <file>`.
+- The read packet records file size and modified time.
+- If the file changes after the packet is created, the packet is stale. Tokenless blocks the next access and asks for a fresh `tokenless read`.
+- There is no broad edit grace window after a file changes. This avoids stale line numbers and accidental edits against old evidence.
+- For several related changes in the same area, expand the relevant lines and use one `MultiEdit` while the packet is still current.
+
+The regression check is:
+
+```bash
+npm run eval:read
+```
+
+## Edit and Write packets
+
+Tokenless can cap large successful `Edit`, `MultiEdit`, and low-risk `Write` tool results.
+
+This is intentionally conservative:
+
+- Successful `Edit` / `MultiEdit` output over roughly 3000 estimated tokens can be replaced with `TOKENLESS-EDIT-PACKET/0.1`.
+- Successful low-risk `Write` output over roughly 5000 estimated tokens can be replaced with `TOKENLESS-WRITE-PACKET/0.1`.
+- Failed or risky outputs are not compressed.
+- Source-code `Write` outputs are not compressed by default.
+- Raw tool output is saved as a local artifact before replacement.
+
+Risky outputs are passed through unchanged when they include signals such as:
+
+```text
+Error
+Failed
+old_string
+not found
+multiple matches
+ambiguous
+permission denied
+conflict
+No changes
+partial
+```
+
+The edit/write packet does not claim the edit is semantically correct. It only confirms the tool completed successfully, records the raw artifact, and tells the agent that any previous read packet for the file should be treated as stale.
 
 ## Quick demo
 
@@ -66,7 +131,7 @@ Claude sees TOKENLESS-PACKET/0.1
 Use the local CLI directly:
 
 ```bash
-node plugins/claude-code/bin/acc --help
+node plugins/claude-code/bin/tokenless --help
 ```
 
 For npm/global packaging, Tokenless exposes both commands:
@@ -82,12 +147,76 @@ Common commands:
 
 ```bash
 tokenless run --agent --data-dir /tmp/tokenless-test -- npm test
-tokenless latest --data-dir ~/.acc
-tokenless list --data-dir ~/.acc
-tokenless show latest --data-dir ~/.acc
-tokenless expand latest --around "Regression family 44" --data-dir ~/.acc
-tokenless clean --data-dir ~/.acc --keep 100 --dry-run
+tokenless latest --data-dir ~/.tokenless
+tokenless list --data-dir ~/.tokenless
+tokenless stats --data-dir ~/.tokenless
+tokenless api-usage --since 24h
+tokenless show latest --data-dir ~/.tokenless
+tokenless expand latest --around "Regression family 44" --data-dir ~/.tokenless
+tokenless clean --data-dir ~/.tokenless --keep 100 --dry-run
 ```
+
+`tokenless stats` separates savings by source:
+
+- `hook`: real Claude Code hook-path compression.
+- `eval`: local evaluation fixtures.
+- `smoke`: manual probes, doctor checks, and ad hoc compression runs.
+- `legacy`: older records created before source tagging.
+
+Local Claude Code API usage:
+
+```bash
+npm run tokenless:api-usage
+npm run tokenless:api-usage:24h
+```
+
+Temporary raw API body probe, for local verification only:
+
+```bash
+node plugins/claude-code/bin/tokenless api-probe start --dir ~/.tokenless/api-bodies
+node plugins/claude-code/bin/tokenless api-probe inspect --dir ~/.tokenless/api-bodies --keyword originalFile
+node plugins/claude-code/bin/tokenless api-probe stats --dir ~/.tokenless/api-bodies
+node plugins/claude-code/bin/tokenless api-probe stop
+```
+
+Raw API bodies can contain full prompts, tool outputs, and sensitive local context. Keep this disabled unless you are verifying what enters model context.
+
+Use `api-probe stats` to separate API-confirmed evidence from local hook savings:
+
+- API-confirmed evidence comes from raw request/response body files.
+- Hook-local savings come from Tokenless artifacts and can include tool outputs that Claude Code does not send back to the API.
+- `read-packet` savings are API-confirmed only when `TOKENLESS-READ-PACKET` appears in request files.
+- `edit-packet` / `write-packet` savings are hook-local unless `TOKENLESS-EDIT-PACKET` or `TOKENLESS-WRITE-PACKET` appears in request files.
+- `originalFile` and `structuredPatch` should normally be zero in request files; non-zero values indicate raw edit payload leakage.
+
+Real Claude Code hook verification:
+
+```bash
+npm run tokenless:real-check -- --api-dir ~/.tokenless/api-bodies-realtest --file /Users/mac/einstein-page/style-probe-2.css
+```
+
+This prints `TOKENLESS-REAL-CHECK/0.1` with:
+
+- real hook-path savings from `tokenless stats`
+- `read-packet`, `edit-packet`, and `write-packet` savings
+- pending large-file gates
+- read-packet index entries for the target file
+- `TOKENLESS-READ-PACKET` and `NEXT REQUIRED COMMAND` matches found in raw API probe files
+- `TOKENLESS-EDIT-PACKET`, `TOKENLESS-WRITE-PACKET`, `blocked before execution`, and `stale` matches found in raw API probe files
+- recent hook trace lines
+
+## Benchmarks
+
+Real Claude Code fuzzy UI edit benchmark:
+
+```text
+Tokenless ON:  519,293 estimated request-body tokens
+Tokenless OFF: 2,822,541 estimated request-body tokens
+Net saved:     2,303,248 estimated request-body tokens
+Reduction:     81.6%
+```
+
+See [benchmarks/fuzzy-ui-edit.md](benchmarks/fuzzy-ui-edit.md).
 
 ## Claude Code hook setup
 
@@ -99,11 +228,41 @@ npm run tokenless:install
 
 This writes `~/.claude/settings.json`, merges with existing hooks, and creates a timestamped backup if the file already exists.
 
+Optional slash commands:
+
+```bash
+npm run tokenless:install-commands
+```
+
+This installs user-level Claude Code commands:
+
+```text
+/tokenless
+/tokenless-mode
+```
+
+`/tokenless` shows local compression savings and the latest artifact. `/tokenless-mode` is reserved for future output discipline modes such as terse, caveman, reviewer, and wenyan.
+
 Check install status:
 
 ```bash
 npm run tokenless:status
 ```
+
+Detect stale or duplicate hook config:
+
+```bash
+npm run doctor
+```
+
+Repair stale Tokenless or old ACC hook entries:
+
+```bash
+npm run tokenless:repair-hooks:dry-run
+npm run tokenless:repair-hooks
+```
+
+`repair-hooks` removes stale project-level hook entries that point at old local checkouts and installs the current user-level Tokenless hooks. It creates timestamped backups before writing settings files.
 
 Preview before writing:
 
@@ -144,13 +303,13 @@ Tokenless currently uses a PreToolUse `deny` decision as a safety mechanism beca
 After a compressed command, inspect the latest artifact:
 
 ```bash
-tokenless latest --data-dir ~/.acc
+tokenless latest --data-dir ~/.tokenless
 ```
 
 Expand only the relevant area:
 
 ```bash
-tokenless expand latest --around "Cannot find module" --data-dir ~/.acc
+tokenless expand latest --around "Cannot find module" --data-dir ~/.tokenless
 ```
 
 This is the core Tokenless loop:
@@ -182,6 +341,18 @@ Run the local health check:
 npm run doctor
 ```
 
+Run read-packet policy checks:
+
+```bash
+npm run eval:read
+```
+
+Run edit/write packet policy checks:
+
+```bash
+npm run eval:edit
+```
+
 ## MVP verification checklist
 
 Run these from the repo root:
@@ -189,9 +360,12 @@ Run these from the repo root:
 ```bash
 cd Tokenless
 npm run eval:complex
+npm run eval:read
+npm run eval:edit
 npm run doctor
 npm run tokenless:status
 npm run tokenless:install:dry-run
+npm run tokenless:repair-hooks:dry-run
 npm run tokenless:uninstall:dry-run
 npm run tokenless:clean:dry-run
 npm run eval:all
@@ -201,9 +375,12 @@ Expected results:
 
 ```text
 eval:complex: pass: yes
+eval:read: read-packet policy checks pass
+eval:edit: edit/write packet policy checks pass
 doctor: all checks [ok]
 tokenless:status: prints TOKENLESS-STATUS/0.1
 tokenless:install:dry-run: prints TOKENLESS-INSTALL-HOOKS/0.1 and merged settings JSON
+tokenless:repair-hooks:dry-run: prints TOKENLESS-REPAIR-HOOKS/0.1
 tokenless:uninstall:dry-run: prints TOKENLESS-UNINSTALL-HOOKS/0.1 and removed count
 tokenless:clean:dry-run: prints TOKENLESS-CLEAN/0.1 with dry_run: yes
 eval:all: all cases pass
@@ -227,7 +404,7 @@ Raw artifact can be expanded with tokenless expand latest
 
 ## Cleanup
 
-Artifacts are stored under the selected `--data-dir`, usually `~/.acc/artifacts`.
+Artifacts are stored under the selected `--data-dir`, usually `~/.tokenless/artifacts`.
 
 Preview cleanup:
 
@@ -238,13 +415,13 @@ npm run tokenless:clean:dry-run
 Delete old artifacts manually:
 
 ```bash
-tokenless clean --data-dir ~/.acc --older-than 7d
+tokenless clean --data-dir ~/.tokenless --older-than 7d
 ```
 
 Keep only the newest 100:
 
 ```bash
-tokenless clean --data-dir ~/.acc --keep 100
+tokenless clean --data-dir ~/.tokenless --keep 100
 ```
 
 ## Current limitations

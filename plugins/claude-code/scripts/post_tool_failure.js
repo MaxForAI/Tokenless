@@ -10,7 +10,7 @@ function shellQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
-function getAccCliPath() {
+function getTokenlessCliPath() {
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, '..');
   return path.join(pluginRoot, 'bin', 'acc');
 }
@@ -38,9 +38,9 @@ function main() {
   const command = toolInput.command || '';
   if (!command || !isNoisyCommand(command)) process.exit(0);
 
-  const dataDir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.acc');
-  const accPath = getAccCliPath();
-  const rewritten = `node ${shellQuote(accPath)} run --agent --data-dir ${shellQuote(dataDir)} -- ${command}`;
+  const dataDir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.tokenless');
+  const tokenlessPath = getTokenlessCliPath();
+  const rewritten = `node ${shellQuote(tokenlessPath)} run --agent --data-dir ${shellQuote(dataDir)} -- ${command}`;
 
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {

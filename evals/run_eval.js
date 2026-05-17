@@ -17,7 +17,7 @@ const runAll = args.size === 0 || args.has('--all');
 const runSynthetic = runAll || args.has('--synthetic');
 const runReal = args.has('--real') || args.has('--all');
 
-const evalDataDir = path.join(os.tmpdir(), 'acc-evals');
+const evalDataDir = path.join(os.tmpdir(), 'tokenless-evals');
 
 const syntheticCases = [
   {
@@ -180,7 +180,8 @@ function evaluateCase(testCase) {
     compactedText: compacted.text,
     beforeTokens: compacted.beforeTokens,
     afterTokens: compacted.afterTokens,
-    status: compacted.status
+    status: compacted.status,
+    source: 'eval'
   });
 
   const readBack = readArtifact(evalDataDir, artifact.artifact_id);
