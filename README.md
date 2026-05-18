@@ -145,6 +145,21 @@ acc --help
 
 `tokenless` is the preferred public command. `acc` remains available as a short compatibility alias and protocol-oriented command.
 
+Start Claude Code through the Tokenless launcher to use the default Lean session
+profile:
+
+```bash
+tokenless launch
+```
+
+`tokenless launch` keeps normal read, edit, write, and bash tools available, but
+disables high-overhead Task/Plan tools by default. If you need Claude Code's
+native task list and plan-mode UI for a session, opt back in:
+
+```bash
+TOKENLESS_ALLOW_TASK_TOOLS=1 tokenless launch
+```
+
 Common commands:
 
 ```bash
