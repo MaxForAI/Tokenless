@@ -209,12 +209,110 @@ The TSX path is useful but more trajectory-sensitive than CSS. The read packet
 can appear in many follow-up requests, so the savings depend heavily on whether
 the model edits directly from the packet or continues exploring.
 
+## Multifile React dashboard benchmark
+
+Fixture family: immutable original copied from:
+
+```text
+/Users/mac/aurora-ops-multifile-benchmark-original
+```
+
+The task is an agentic product-polish pass across a React dashboard with
+component files, data, utilities, and a large dashboard stylesheet.
+
+Task prompt:
+
+```text
+这个 React 运营控制台现在整体质感和可用性都偏普通。你帮我做一轮产品级提升，重点是筛选区、指标卡、表格状态展示、侧边事件面板、按钮反馈和整体视觉层次。不要重写整个项目，不要加新依赖，保留青色和橙色的科技运营台方向。你自己判断需要改哪些文件和代码。
+```
+
+### Default Lean + Tokenless ON/OFF
+
+Both runs used the default `tokenless launch` Lean launcher, which disables
+Claude Code Task/Plan tools while keeping normal read, edit, write, and bash
+tools available. This isolates Tokenless ON/OFF under the current default
+launcher behavior.
+
+Tokenless OFF run:
+
+| Metric | Value |
+| --- | ---: |
+| API body directory | `api-bodies-aurora-multifile-lean-final-off-20260518222530` |
+| Request tokens | 628,261 |
+| Response tokens | 29,162 |
+| All tokens | 657,423 |
+| Request files | 16 |
+| `TOKENLESS-READ-PACKET` | 0 |
+| `request_saved_estimate` | 0 |
+
+Tokenless ON run:
+
+| Metric | Value |
+| --- | ---: |
+| API body directory | `api-bodies-aurora-multifile-lean-final-on-20260518222530` |
+| Request tokens | 512,521 |
+| Response tokens | 20,155 |
+| All tokens | 532,676 |
+| Request files | 17 |
+| `TOKENLESS-READ-PACKET` | 17 |
+| `request_saved_estimate` | 647,160 |
+
+Raw leak checks for both runs:
+
+```text
+originalFile: 0
+structuredPatch: 0
+oldString: 0
+newString: 0
+```
+
+Result:
+
+```text
+Request saved: 115,740 tokens
+Request reduction: 18.4%
+All saved: 124,747 tokens
+All reduction: 19.0%
+```
+
+The ON run made one more request than the OFF run, but still used fewer request
+tokens overall. This confirms that the reduction did not come from simply
+stopping earlier.
+
+### Lean mode Task/Plan tool comparison
+
+This comparison measures the launcher-level cost of allowing Claude Code
+Task/Plan tools. It is product overhead reduction, not read-packet compression.
+
+| Mode | API body directory | Request tokens | All tokens | Request files |
+| --- | --- | ---: | ---: | ---: |
+| Task/Plan tools enabled | `api-bodies-aurora-multifile-task-on-` | 1,524,894 | 1,565,109 | 36 |
+| Lean default, Task/Plan tools disabled | `api-bodies-aurora-multifile-lean-on-20260518205433` | 1,087,753 | 1,111,762 | 34 |
+
+Result:
+
+```text
+Request saved: 437,141 tokens
+Request reduction: 28.7%
+All saved: 453,347 tokens
+All reduction: 29.0%
+```
+
+In the Lean run, Task/Plan tool schema and Task/Plan history were absent from
+request bodies. In the Task-enabled run, Task/Plan tool schema alone accounted
+for about 134k request tokens. The remaining delta came from changed trajectory
+and follow-up context size.
+
 ## Notes for future README claims
 
 Use conservative public wording:
 
 - CSS visual-edit benchmark: about 54-60% request-token reduction.
 - 10k React/TSX single-file edit: about 40% request-token reduction.
+- Multifile React dashboard in the default Lean launcher: about 18% request-token
+  reduction from Tokenless ON/OFF.
+- Lean launcher Task/Plan tool trimming: about 29% request-token reduction in
+  the multifile dashboard task family.
 - The current strongest evidence is API request-body reduction, not exact billed
   token savings.
 - Do not claim universal 80%+ savings from the current data.

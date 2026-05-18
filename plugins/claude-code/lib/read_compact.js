@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('path');
+const fs = require('fs');
 const { estimateTokens } = require('./compact');
 
 const LOW_RISK_EXTENSIONS = new Set([
@@ -46,7 +47,41 @@ const SOURCE_PACKET_EXTENSIONS = new Set([
   '.js',
   '.jsx',
   '.ts',
-  '.tsx'
+  '.tsx',
+  '.py'
+]);
+
+const SFC_PACKET_EXTENSIONS = new Set([
+  '.vue',
+  '.svelte'
+]);
+
+const SOURCE_NEIGHBOR_EXTENSIONS = new Set([
+  '.js',
+  '.jsx',
+  '.ts',
+  '.tsx',
+  '.py',
+  '.vue',
+  '.svelte',
+  '.css',
+  '.scss',
+  '.sass',
+  '.less',
+  '.json'
+]);
+
+const SOURCE_SCAN_IGNORED_DIRS = new Set([
+  'node_modules',
+  '.git',
+  'dist',
+  'build',
+  'coverage',
+  '.next',
+  '.nuxt',
+  '.svelte-kit',
+  'vendor',
+  'generated'
 ]);
 
 function getFileExtension(filePath) {
@@ -67,6 +102,7 @@ function shouldCompactRead({ filePath, text, tokens }) {
   if (tokens < 4000) return false;
   if (isGeneratedPath(filePath)) return true;
   if (LOW_RISK_EXTENSIONS.has(ext)) return true;
+  if (SFC_PACKET_EXTENSIONS.has(ext)) return tokens >= 12000;
   if (SOURCE_PACKET_EXTENSIONS.has(ext)) return tokens >= 30000;
   if (SOURCE_EXTENSIONS.has(ext)) return false;
   return tokens >= 12000;
@@ -95,11 +131,22 @@ function collectAnchors(lines, filePath) {
     patterns.push({ type: 'heading', regex: /^\s{0,3}#{1,6}\s+.+/ });
     patterns.push({ type: 'error', regex: /error|failed|exception|warning/i });
   } else if (SOURCE_PACKET_EXTENSIONS.has(ext)) {
-    patterns.push({ type: 'import', regex: /^\s*import\s.+\sfrom\s+['"][^'"]+['"]/ });
-    patterns.push({ type: 'export', regex: /^\s*export\s+(?:default\s+)?(?:async\s+)?(?:function|class|const|let|var|type|interface)\s+\w+/ });
-    patterns.push({ type: 'component', regex: /^\s*(?:export\s+)?(?:default\s+)?(?:function|const)\s+[A-Z][A-Za-z0-9_$]*/ });
-    patterns.push({ type: 'hook', regex: /^\s*(?:export\s+)?(?:const|function)\s+use[A-Z][A-Za-z0-9_$]*/ });
-    patterns.push({ type: 'function', regex: /^\s*(?:export\s+)?(?:async\s+)?function\s+[A-Za-z_$][\w$]*|^\s*(?:export\s+)?(?:const|let)\s+[A-Za-z_$][\w$]*\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/ });
+    if (ext === '.py') {
+      patterns.push({ type: 'import', regex: /^\s*(?:from\s+[A-Za-z0-9_.$]+\s+import\s+|import\s+[A-Za-z0-9_.$]+)/ });
+      patterns.push({ type: 'class', regex: /^\s*class\s+[A-Za-z_][\w]*(?:\([^)]*\))?:/ });
+      patterns.push({ type: 'function', regex: /^\s*(?:async\s+)?def\s+[A-Za-z_][\w]*\s*\(/ });
+    } else {
+      patterns.push({ type: 'import', regex: /^\s*import\s.+\sfrom\s+['"][^'"]+['"]/ });
+      patterns.push({ type: 'export', regex: /^\s*export\s+(?:default\s+)?(?:async\s+)?(?:function|class|const|let|var|type|interface)\s+\w+/ });
+      patterns.push({ type: 'component', regex: /^\s*(?:export\s+)?(?:default\s+)?(?:function|const)\s+[A-Z][A-Za-z0-9_$]*/ });
+      patterns.push({ type: 'hook', regex: /^\s*(?:export\s+)?(?:const|function)\s+use[A-Z][A-Za-z0-9_$]*/ });
+      patterns.push({ type: 'function', regex: /^\s*(?:export\s+)?(?:async\s+)?function\s+[A-Za-z_$][\w$]*|^\s*(?:export\s+)?(?:const|let)\s+[A-Za-z_$][\w$]*\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/ });
+    }
+  } else if (SFC_PACKET_EXTENSIONS.has(ext)) {
+    patterns.push({ type: 'sfc-section', regex: /^\s*<\/?(template|script|style)\b/i });
+    patterns.push({ type: 'template-component', regex: /^\s*<[A-Z][A-Za-z0-9_.:-]*/ });
+    patterns.push({ type: 'template-interaction', regex: /\b(@click|on:click|v-if|v-for|bind:|class=|class:)/ });
+    patterns.push({ type: 'style-selector', regex: /^\s*([.#][A-Za-z0-9_-][^{,]*(?:,[^{]+)?|\w[\w-]*(?:\s+[.#\w][^{]*)?)\s*\{/ });
   }
 
   for (let i = 0; i < lines.length; i++) {
@@ -624,6 +671,9 @@ function buildPacketActionBoundary({ artifact, tokenlessPath, dataDir }) {
     '- First action after this packet should be one minimal native Read on this file to register editor state if you plan to edit.',
     '- After that registration Read, make 6-10 bounded Edit calls from the snippets below without additional exploration.',
     '- Use snippets below as exact old_string sources.',
+    '- Do not create TaskCreate/task-list/plan-mode output for this bounded edit task; edit directly.',
+    '- Do not use Write to overwrite an existing file after this packet; use bounded Edit/MultiEdit.',
+    '- Do not rewrite generated/noise blocks unless the user explicitly asks.',
     '- Do not wait for "File must be read first"; proactively do the minimal registration Read once, then edit. If it still appears, do not remap the file.',
     '- Do not run tokenless read again for this file unless Tokenless reports TOKENLESS-STALE.',
     '- tokenless read is whole-file packet creation only; it does not support --range, --selector, --lines, or similar lookup flags.',
@@ -745,11 +795,58 @@ const SOURCE_EDIT_HINT_RE = /\b(handler|handle|submit|save|delete|update|render|
 
 function sourceLang(filePath) {
   const ext = getFileExtension(filePath);
+  if (ext === '.py') return 'py';
   if (ext === '.ts' || ext === '.tsx') return 'ts';
   return 'js';
 }
 
-function getSourceDeclarations(lines) {
+function countIndent(line) {
+  const match = String(line || '').match(/^\s*/);
+  return match ? match[0].replace(/\t/g, '    ').length : 0;
+}
+
+function getPythonDeclarations(lines) {
+  const declarations = [];
+  const re = /^(\s*)(?:(async)\s+)?(def|class)\s+([A-Za-z_][\w]*)\s*(?:\(|[:(])/;
+
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(re);
+    if (!match) continue;
+    const startIndent = countIndent(match[1] || '');
+    const keyword = match[3];
+    const name = match[4];
+    let end = i + 1;
+    let editScore = SOURCE_EDIT_HINT_RE.test(name) ? 2 : 0;
+
+    for (let j = i + 1; j < lines.length; j++) {
+      const raw = lines[j];
+      const trimmed = raw.trim();
+      if (trimmed && countIndent(raw) <= startIndent && /^(?:async\s+)?(?:def|class)\s+[A-Za-z_][\w]*/.test(trimmed)) {
+        break;
+      }
+      if (SOURCE_EDIT_HINT_RE.test(raw)) editScore += 1;
+      end = j + 1;
+      if ((end - i) >= 140) break;
+    }
+
+    declarations.push({
+      start: i + 1,
+      end,
+      keyword,
+      name,
+      exported: !name.startsWith('_'),
+      lines: end - i,
+      reactScore: 0,
+      editScore
+    });
+  }
+
+  return declarations;
+}
+
+function getSourceDeclarations(lines, filePath) {
+  if (getFileExtension(filePath) === '.py') return getPythonDeclarations(lines);
+
   const declarations = [];
   let current = null;
   let depth = 0;
@@ -797,9 +894,37 @@ function getSourceDeclarations(lines) {
 function extractSourceImports(lines) {
   const out = [];
   for (let i = 0; i < lines.length; i++) {
-    if (/^\s*import\s/.test(lines[i])) out.push({ line: i + 1, text: truncateText(lines[i], 120) });
+    if (/^\s*(?:import\s|from\s+[A-Za-z0-9_.$]+\s+import\s)/.test(lines[i])) out.push({ line: i + 1, text: truncateText(lines[i], 120) });
   }
   return out;
+}
+
+function extractSourceImportSpecifiers(lines) {
+  const specs = [];
+  const seen = new Set();
+  const importRe = /^\s*import(?:\s+type)?(?:[^'"]*\s+from\s+)?['"]([^'"]+)['"]/;
+  const dynamicRe = /\bimport\(\s*['"]([^'"]+)['"]\s*\)/g;
+  const requireRe = /\brequire\(\s*['"]([^'"]+)['"]\s*\)/g;
+
+  for (const line of lines) {
+    const staticMatch = line.match(importRe);
+    if (staticMatch && !seen.has(staticMatch[1])) {
+      specs.push(staticMatch[1]);
+      seen.add(staticMatch[1]);
+    }
+
+    for (const re of [dynamicRe, requireRe]) {
+      re.lastIndex = 0;
+      let match;
+      while ((match = re.exec(line)) !== null) {
+        if (seen.has(match[1])) continue;
+        specs.push(match[1]);
+        seen.add(match[1]);
+      }
+    }
+  }
+
+  return specs;
 }
 
 function extractSourceExports(lines) {
@@ -811,6 +936,7 @@ function extractSourceExports(lines) {
 }
 
 function classifySourceDeclaration(decl) {
+  if (decl.keyword === 'class') return 'class';
   if (/^use[A-Z]/.test(decl.name)) return 'hook';
   if (/^[A-Z]/.test(decl.name) && decl.reactScore > 0) return 'component';
   if (/reducer|state|store/i.test(decl.name)) return 'state/reducer';
@@ -821,8 +947,8 @@ function classifySourceDeclaration(decl) {
   return 'helpers';
 }
 
-function summarizeSourceMap(lines) {
-  const declarations = getSourceDeclarations(lines);
+function summarizeSourceMap(lines, filePath) {
+  const declarations = getSourceDeclarations(lines, filePath);
   if (!declarations.length) return [];
 
   const buckets = new Map();
@@ -832,7 +958,7 @@ function summarizeSourceMap(lines) {
     buckets.get(label).push(decl);
   }
 
-  const priority = ['component', 'hook', 'state/reducer', 'handlers/actions', 'data/loaders', 'ui/helpers', 'exports/api', 'helpers'];
+  const priority = ['component', 'hook', 'class', 'state/reducer', 'handlers/actions', 'data/loaders', 'ui/helpers', 'exports/api', 'helpers'];
   const out = ['Source map:'];
   for (const label of priority) {
     const items = (buckets.get(label) || []).slice(0, 5);
@@ -842,8 +968,8 @@ function summarizeSourceMap(lines) {
   return out.length > 1 ? out : [];
 }
 
-function selectSourceSnippetRegions(lines) {
-  const declarations = getSourceDeclarations(lines);
+function selectSourceSnippetRegions(lines, filePath) {
+  const declarations = getSourceDeclarations(lines, filePath);
   const scored = declarations
     .map((decl) => {
       let score = 0;
@@ -885,6 +1011,10 @@ function buildSourceActionBoundary({ artifact, tokenlessPath, dataDir }) {
     '- First action after this packet should be one minimal native Read on this file to register editor state if you plan to edit.',
     '- After that registration Read, make 4-8 bounded Edit calls from the snippets below without additional exploration.',
     '- Use snippets below as exact old_string sources.',
+    '- If this is a multi-file task, use Project file hints below before running ls/find/grep.',
+    '- Do not create TaskCreate/task-list/plan-mode output for this bounded edit task; edit directly.',
+    '- Do not use Write to overwrite an existing file after this packet; use bounded Edit/MultiEdit.',
+    '- Do not rewrite generated/noise blocks unless the user explicitly asks.',
     '- Do not remap the file with grep/rg/sed or repeated Read calls.',
     '- Do not run tokenless read again for this file unless Tokenless reports TOKENLESS-STALE.',
     '- If exact text is missing, only these artifact lookup commands are valid:',
@@ -894,13 +1024,137 @@ function buildSourceActionBoundary({ artifact, tokenlessPath, dataDir }) {
   ];
 }
 
+function findSourceProjectRoot(filePath) {
+  let dir = path.dirname(path.resolve(filePath || '.'));
+  const stop = path.parse(dir).root;
+  for (let depth = 0; depth < 8 && dir && dir !== stop; depth++) {
+    const markers = ['package.json', 'tsconfig.json', 'jsconfig.json', 'vite.config.ts', 'next.config.js', 'pyproject.toml', 'setup.py', 'requirements.txt'];
+    if (markers.some((marker) => fs.existsSync(path.join(dir, marker)))) return dir;
+    dir = path.dirname(dir);
+  }
+  return path.dirname(path.resolve(filePath || '.'));
+}
+
+function relativeSourcePath(root, filePath) {
+  const rel = path.relative(root, filePath).replace(/\\/g, '/');
+  return rel && !rel.startsWith('..') ? rel : filePath;
+}
+
+function resolveLocalImport({ specifier, fromFile, root }) {
+  if (!specifier || !specifier.startsWith('.')) return null;
+  const base = path.resolve(path.dirname(fromFile), specifier);
+  const candidates = [
+    base,
+    ...Array.from(SOURCE_NEIGHBOR_EXTENSIONS).map((ext) => `${base}${ext}`),
+    ...Array.from(SOURCE_NEIGHBOR_EXTENSIONS).map((ext) => path.join(base, `index${ext}`))
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      const stat = fs.statSync(candidate);
+      if (stat.isFile()) return relativeSourcePath(root, candidate);
+    } catch (err) {
+      // Try next candidate.
+    }
+  }
+  return null;
+}
+
+function walkSourceFiles(dir, root, out, options = {}) {
+  const maxFiles = options.maxFiles || 160;
+  const maxDepth = options.maxDepth || 4;
+  const depth = options.depth || 0;
+  if (out.length >= maxFiles || depth > maxDepth) return;
+
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    return;
+  }
+
+  entries
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .forEach((entry) => {
+      if (out.length >= maxFiles) return;
+      if (entry.name.startsWith('.') && entry.name !== '.storybook') return;
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (SOURCE_SCAN_IGNORED_DIRS.has(entry.name)) return;
+        walkSourceFiles(abs, root, out, { ...options, depth: depth + 1 });
+        return;
+      }
+      if (!entry.isFile()) return;
+      const ext = getFileExtension(abs);
+      if (!SOURCE_NEIGHBOR_EXTENSIONS.has(ext)) return;
+      out.push(relativeSourcePath(root, abs));
+    });
+}
+
+function collectNearbySourceFiles(filePath, root) {
+  const dirs = [];
+  const addDir = (dir) => {
+    if (!dir || !fs.existsSync(dir)) return;
+    const normalized = path.resolve(dir);
+    if (dirs.includes(normalized)) return;
+    dirs.push(normalized);
+  };
+
+  const currentDir = path.dirname(path.resolve(filePath));
+  addDir(currentDir);
+  addDir(path.join(root, 'src'));
+  addDir(path.join(root, 'app'));
+  addDir(path.join(root, 'components'));
+  addDir(path.join(root, 'pages'));
+
+  const out = [];
+  for (const dir of dirs) {
+    walkSourceFiles(dir, root, out, { maxFiles: 120, maxDepth: dir === currentDir ? 2 : 3 });
+    if (out.length >= 120) break;
+  }
+
+  return Array.from(new Set(out))
+    .filter((item) => item !== relativeSourcePath(root, path.resolve(filePath)))
+    .slice(0, 40);
+}
+
+function summarizeSourceProjectHints(lines, filePath) {
+  const root = findSourceProjectRoot(filePath);
+  const current = relativeSourcePath(root, path.resolve(filePath));
+  const specs = extractSourceImportSpecifiers(lines);
+  const localImports = Array.from(new Set(
+    specs
+      .map((specifier) => resolveLocalImport({ specifier, fromFile: path.resolve(filePath), root }))
+      .filter(Boolean)
+  ));
+  const nearby = collectNearbySourceFiles(filePath, root)
+    .filter((item) => !localImports.includes(item))
+    .slice(0, 16);
+
+  if (!localImports.length && !nearby.length) return [];
+
+  const out = [
+    'Project file hints:',
+    `- current: ${current}`,
+    '- Use these path hints before running ls/find/grep for nearby project files.'
+  ];
+
+  if (localImports.length) {
+    out.push(`- local imports: ${localImports.slice(0, 12).join(', ')}${localImports.length > 12 ? ` (${localImports.length - 12} more)` : ''}`);
+  }
+  if (nearby.length) {
+    out.push(`- nearby source/style/data files: ${nearby.join(', ')}`);
+  }
+  return out;
+}
+
 function buildSourceActionBrief(lines, context = {}) {
-  const regions = selectSourceSnippetRegions(lines);
+  const regions = selectSourceSnippetRegions(lines, context.filePath);
   const labels = regions.map((region) => `${region.label}:${region.name} ${region.start}:${region.end}`);
   return [
     ...buildSourceActionBoundary(context),
     'Action brief:',
-    '- For broad JS/TS/React edits, do not fully map the file. Register editor state once, then edit from snippets.',
+    '- For broad source edits, do not fully map the file. Register editor state once, then edit from snippets.',
     labels.length
       ? `- Suggested first-pass targets: ${labels.join('; ')}.`
       : '- Suggested first-pass targets: exported component, hook/state logic, handlers, data loaders, UI helper blocks.',
@@ -910,7 +1164,7 @@ function buildSourceActionBrief(lines, context = {}) {
 }
 
 function extractSourceEditableSnippets(lines, filePath) {
-  const regions = selectSourceSnippetRegions(lines);
+  const regions = selectSourceSnippetRegions(lines, filePath);
   if (!regions.length) return [];
   const lang = sourceLang(filePath);
   const out = [
@@ -931,11 +1185,94 @@ function summarizeSource(lines, filePath, context = {}) {
   const imports = extractSourceImports(lines);
   const exports = extractSourceExports(lines);
   return [
-    ...buildSourceActionBrief(lines, context),
+    ...buildSourceActionBrief(lines, { ...context, filePath }),
+    ...summarizeSourceProjectHints(lines, filePath),
     ...extractSourceEditableSnippets(lines, filePath),
-    ...summarizeSourceMap(lines),
+    ...summarizeSourceMap(lines, filePath),
     ...renderSection('Imports', imports, 10, (item) => `- line ${item.line} ${item.text}`, 'imports'),
     ...renderSection('Exports', exports, 10, (item) => `- line ${item.line} ${item.text}`, 'exports')
+  ];
+}
+
+function getSfcSections(lines) {
+  const sections = [];
+  const openRe = /^\s*<(template|script|style)\b[^>]*>/i;
+  const closeRe = (name) => new RegExp(`^\\s*</${name}>`, 'i');
+
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(openRe);
+    if (!match) continue;
+    const name = match[1].toLowerCase();
+    let end = i + 1;
+    for (let j = i + 1; j < lines.length; j++) {
+      end = j + 1;
+      if (closeRe(name).test(lines[j])) break;
+    }
+    sections.push({
+      name,
+      start: i + 1,
+      end,
+      text: truncateText(lines[i], 120)
+    });
+  }
+
+  return sections;
+}
+
+function extractSfcTemplateHints(lines) {
+  const out = [];
+  const re = /<[A-Z][A-Za-z0-9_.:-]*|(@click|on:click|v-if|v-for|bind:|class=|class:|on:submit|@submit)/;
+  for (let i = 0; i < lines.length; i++) {
+    if (re.test(lines[i])) out.push({ line: i + 1, text: truncateText(lines[i], 140) });
+  }
+  return out;
+}
+
+function extractSfcEditableSnippets(lines, filePath) {
+  const sections = getSfcSections(lines);
+  if (!sections.length) return [];
+  const lang = getFileExtension(filePath) === '.svelte' ? 'svelte' : 'vue';
+  const out = [
+    'Editable snippets:',
+    '- Exact current text for high-impact component regions; prefer editing from these before more inspection.'
+  ];
+  for (const section of sections.slice(0, 4)) {
+    const start = section.start;
+    const end = Math.min(section.end, section.start + 90);
+    const suffix = end < section.end ? ` (truncated, full section ${section.start}:${section.end})` : '';
+    out.push(`- ${section.name}: lines ${section.start}:${section.end}${suffix}`);
+    out.push(`\`\`\`${lang}`);
+    out.push(lines.slice(start - 1, end).join('\n'));
+    out.push('```');
+  }
+  return out;
+}
+
+function buildSfcActionBrief(lines, filePath, context = {}) {
+  const sections = getSfcSections(lines);
+  return [
+    ...buildSourceActionBoundary(context),
+    'Action brief:',
+    '- For Vue/Svelte edits, use section snippets first: template for structure/interactions, script for state/actions, style for visuals.',
+    sections.length
+      ? `- Sections: ${sections.map((section) => `${section.name} ${section.start}:${section.end}`).join('; ')}.`
+      : '- Sections: inspect template/script/style snippets before any broad exploration.',
+    '- Do not run tests, build, typecheck, or browser validation unless the user explicitly asks.',
+    '- Final answer: 3-5 concise bullets only; do not write a long change diary.'
+  ];
+}
+
+function summarizeSfc(lines, filePath, context = {}) {
+  const sections = getSfcSections(lines);
+  const imports = extractSourceImports(lines);
+  const templateHints = extractSfcTemplateHints(lines);
+  return [
+    ...buildSfcActionBrief(lines, filePath, { ...context, filePath }),
+    ...summarizeSourceProjectHints(lines, filePath),
+    ...extractSfcEditableSnippets(lines, filePath),
+    ...renderSection('SFC sections', sections, 8, (item) => `- ${item.name} lines ${item.start}:${item.end} ${item.text}`, 'sections'),
+    ...renderSection('Template interaction/component hints', templateHints, 14, (item) => `- line ${item.line} ${item.text}`, 'template hints'),
+    ...renderSection('Script imports', imports, 10, (item) => `- line ${item.line} ${item.text}`, 'imports')
   ];
 }
 
@@ -949,6 +1286,9 @@ function buildEditableSummary(lines, anchors, filePath, context = {}) {
   }
   if (SOURCE_PACKET_EXTENSIONS.has(ext)) {
     return summarizeSource(lines, filePath, context);
+  }
+  if (SFC_PACKET_EXTENSIONS.has(ext)) {
+    return summarizeSfc(lines, filePath, context);
   }
   return [];
 }

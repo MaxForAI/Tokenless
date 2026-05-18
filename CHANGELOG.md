@@ -9,6 +9,9 @@
 - `tokenless benchmark-copy aurora-10k-tsx` creates fresh ON/OFF benchmark copies and prints matching launch/stat commands.
 - `tokenless api-probe start --name <slug>` creates a timestamped API-body directory and prints reusable telemetry exports.
 - `npm run eval:cli-smoke` verifies the new CLI surfaces without launching Claude Code.
+- Large JS/TS source packets now include bounded project file hints for nearby/imported source, style, and data files.
+- Large Python files now use source-oriented read packets with imports, classes, functions, snippets, and nearby file hints.
+- Large Vue/Svelte single-file components now use component-oriented read packets with template/script/style sections, interaction hints, snippets, and local component hints.
 
 ### Documentation
 

@@ -206,7 +206,54 @@ function packetNameForTool(toolName) {
   return 'TOKENLESS-EDIT-PACKET/0.1';
 }
 
-function formatEditPacket({ toolName, filePath, beforeTokens, afterTokens, artifactPointer, responseText }) {
+function summarizeEditInput(toolName, toolInput) {
+  if (!toolInput || typeof toolInput !== 'object') return [];
+
+  if (toolName === 'Write') {
+    const content = typeof toolInput.content === 'string' ? toolInput.content : '';
+    if (!content) return [];
+    return [
+      'Change shape: full-file Write',
+      `Input content: chars=${content.length} lines=${countLines(content)}`,
+      'Guardrail: prefer bounded Edit/MultiEdit for existing files; full Write input cannot be retroactively removed from the request that created it.'
+    ];
+  }
+
+  if (toolName === 'Edit') {
+    const oldString = typeof toolInput.old_string === 'string' ? toolInput.old_string : '';
+    const newString = typeof toolInput.new_string === 'string' ? toolInput.new_string : '';
+    return [
+      'Change shape: single Edit',
+      `Input strings: old_chars=${oldString.length} new_chars=${newString.length} old_lines=${countLines(oldString)} new_lines=${countLines(newString)}`
+    ];
+  }
+
+  if (toolName === 'MultiEdit') {
+    const edits = Array.isArray(toolInput.edits) ? toolInput.edits : [];
+    return [
+      'Change shape: MultiEdit',
+      `Input edits: count=${edits.length}`
+    ];
+  }
+
+  return [];
+}
+
+function summarizeLargeToolResponse(responseText) {
+  const text = String(responseText || '');
+  const generatedUtilityMatches = text.match(/generated-utility-/g) || [];
+  const selectors = Array.from(new Set(text.match(/\.[A-Za-z_][A-Za-z0-9_-]*(?=\s*[,{])/g) || [])).slice(0, 16);
+  const out = [];
+  if (generatedUtilityMatches.length) {
+    out.push(`Noise detected: generated utility block references=${generatedUtilityMatches.length}`);
+  }
+  if (selectors.length) {
+    out.push(`Touched selectors/classes: ${selectors.join(', ')}`);
+  }
+  return out;
+}
+
+function formatEditPacket({ toolName, toolInput, filePath, beforeTokens, afterTokens, artifactPointer, responseText }) {
   const packetName = packetNameForTool(toolName);
   const stat = filePath ? safeFileStat(filePath) : null;
   const editCount = toolName === 'MultiEdit' && responseText
@@ -224,9 +271,13 @@ function formatEditPacket({ toolName, filePath, beforeTokens, afterTokens, artif
     editCount ? `Edits: ${editCount}` : null,
     `Compression: ${beforeTokens} -> ${afterTokens} estimated tokens`,
     '',
+    ...summarizeEditInput(toolName, toolInput),
+    ...summarizeLargeToolResponse(responseText),
+    '',
     'Effect:',
     '- edit/write tool completed successfully',
-    '- file may have changed',
+    '- raw tool result and large diff are stored locally, not repeated here',
+    '- file may have changed; use the artifact only if you need exact diff details',
     '- small Edit/MultiEdit calls may continue under the short Tokenless edit lease',
     '- run tokenless read after Write, large edits, external changes, or lease exhaustion',
     '- keep subsequent tool inputs small; do not use large patch scripts as a workaround',
@@ -247,6 +298,16 @@ function safeFileStat(filePath) {
 }
 
 function replaceToolOutputWithPacket(response, packetText) {
+  if (typeof response === 'string') return packetText;
+  if (response && typeof response === 'object') {
+    const next = {
+      type: response.type || 'text',
+      content: packetText
+    };
+    if (response.filePath) next.filePath = response.filePath;
+    if (response.file_path) next.file_path = response.file_path;
+    return next;
+  }
   return packetText;
 }
 
@@ -322,6 +383,7 @@ function compactEditLikeTool(toolName, toolInput, response) {
   });
   const draftPacket = formatEditPacket({
     toolName,
+    toolInput,
     filePath,
     beforeTokens,
     afterTokens: 0,
@@ -331,6 +393,7 @@ function compactEditLikeTool(toolName, toolInput, response) {
   const afterTokens = estimateTokens(draftPacket);
   const packetText = formatEditPacket({
     toolName,
+    toolInput,
     filePath,
     beforeTokens,
     afterTokens,

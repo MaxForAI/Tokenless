@@ -128,6 +128,11 @@ function denyForLargeGeneratedInput({ kind, detail, command }) {
   ].filter(Boolean).join('\n'));
 }
 
+function countLines(text) {
+  if (typeof text !== 'string' || !text) return 0;
+  return text.split(/\r?\n/).length;
+}
+
 function isLargeGeneratedBashInput(command) {
   const text = String(command || '');
   if (text.length < 3500) return null;
@@ -143,6 +148,30 @@ function isLargeGeneratedBashInput(command) {
 
   const hit = patterns.find((item) => item.re.test(text));
   return hit ? hit.name : null;
+}
+
+function isLargeExistingWriteOverwrite(toolName, toolInput) {
+  if (String(process.env.TOKENLESS_ALLOW_LARGE_WRITE || '').trim() === '1') return null;
+  if (toolName !== 'Write') return null;
+
+  const filePath = toolInput.file_path || toolInput.path || '';
+  const content = typeof toolInput.content === 'string' ? toolInput.content : '';
+  if (!filePath || !content) return null;
+
+  const lines = countLines(content);
+  if (content.length < 8000 && lines < 160) return null;
+
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (err) {
+    return null;
+  }
+  if (!stat.isFile()) return null;
+
+  const existingTokens = Math.max(1, Math.ceil(stat.size / 4));
+  const nextTokens = Math.max(1, Math.ceil(Buffer.byteLength(content, 'utf8') / 4));
+  return `${filePath} existing_tokens=${existingTokens} next_tokens=${nextTokens} next_lines=${lines}`;
 }
 
 function isLargeGeneratedWriteInput(toolName, toolInput) {
@@ -333,6 +362,17 @@ function main() {
   const toolName = input.tool_name || input.toolName;
   const toolInput = input.tool_input || input.toolInput || {};
   const dataDir = getDataDir();
+
+  const largeOverwriteDetail = isLargeExistingWriteOverwrite(toolName, toolInput);
+  if (largeOverwriteDetail) {
+    trace({ event: 'deny', reason: 'large-existing-write-overwrite', tool: toolName, detail: largeOverwriteDetail });
+    denyForLargeGeneratedInput({
+      kind: `${toolName} overwrite`,
+      detail: largeOverwriteDetail,
+      command: toolInput.content || ''
+    });
+    return;
+  }
 
   const largeWriteDetail = isLargeGeneratedWriteInput(toolName, toolInput);
   if (largeWriteDetail) {

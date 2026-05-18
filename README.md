@@ -12,11 +12,11 @@ The current wire format is `TOKENLESS-PACKET/0.1`.
 - Build and CI logs: `npm run build`, `docker build`, `kubectl logs`
 - Diffs: `git diff`, `git log`
 - Search and tree output: `rg`, `grep -R`, `find`, `tree`, `ls -R`
-- Large low-risk reads: CSS, HTML, JSON, logs, docs, generated files, and large JS/TS source files
+- Large low-risk reads: CSS, HTML, JSON, logs, docs, generated files, large JS/TS/Python source files, and large Vue/Svelte components
 - Large successful edit/write tool results: conservative `TOKENLESS-EDIT-PACKET` / `TOKENLESS-WRITE-PACKET`
 - Fallback compression for unexpectedly huge Bash output
 
-Small bounded commands such as `rg -m 20`, `find ... | head`, `cat file | grep`, and `tree | head` are allowed through directly. Small reads are not compressed by default. JS/TS source reads are only compressed when they cross the large-source threshold.
+Small bounded commands such as `rg -m 20`, `find ... | head`, `cat file | grep`, and `tree | head` are allowed through directly. Small reads are not compressed by default. JS/TS/Python source reads are only compressed when they cross the large-source threshold. Vue/Svelte single-file components use a lower threshold because they combine template, script, and style in one file.
 
 ## How it works
 
@@ -38,9 +38,10 @@ Tokenless can cap large low-risk `Read` outputs as `TOKENLESS-READ-PACKET/0.1`.
 Default policy:
 
 - Compress low-risk reads over roughly 4000 estimated tokens: CSS, HTML, JSON, logs, docs, lockfiles, generated files.
-- Compress large JS/TS/React source reads over roughly 30000 estimated tokens with source-oriented packets.
+- Compress large JS/TS/React/Python source reads over roughly 30000 estimated tokens with source-oriented packets.
+- Compress large Vue/Svelte single-file components over roughly 12000 estimated tokens with component-oriented packets.
 - Do not compress small files.
-- Do not compress other source files such as `.py`, `.go`, `.rs` by default.
+- Do not compress other source files such as `.go`, `.rs`, `.java`, `.swift`, `.cpp` by default.
 
 Read packets are indexes, not edit evidence. If a model needs to modify exact code or style, it must expand the relevant lines first:
 
@@ -183,6 +184,22 @@ node plugins/claude-code/bin/tokenless api-probe stop
 
 Raw API bodies can contain full prompts, tool outputs, and sensitive local context. Keep this disabled unless you are verifying what enters model context.
 
+### Lean mode: Task/Plan tools
+
+The `tokenless launch` command defaults to a lean Claude Code session: it
+disables high-overhead Task/Plan tools (`TaskCreate`, `TaskUpdate`,
+`TaskList`, `TaskGet`, `EnterPlanMode`, and `ExitPlanMode`) while keeping normal
+execution tools such as read, edit, write, and bash available.
+
+This reduces fixed tool-schema overhead and prevents task-list history from
+being repeatedly carried through API request context. If you want Claude Code's
+native task list and plan-mode UI back for a session, opt in explicitly:
+
+```bash
+node plugins/claude-code/bin/tokenless launch
+TOKENLESS_ALLOW_TASK_TOOLS=1 node plugins/claude-code/bin/tokenless launch
+```
+
 Use `api-probe stats` to separate API-confirmed evidence from local hook savings:
 
 - API-confirmed evidence comes from raw request/response body files.
@@ -213,10 +230,12 @@ These are real Claude Code API-body measurements from fuzzy UI-edit tasks. The
 main metric is estimated request-body tokens from raw API request logs, not local
 hook-side savings estimates.
 
-| Scenario | Tokenless OFF | Tokenless ON | Request reduction |
+| Scenario | Baseline request tokens | Optimized request tokens | Request reduction |
 | --- | ---: | ---: | ---: |
-| Large CSS visual edit | 1,017,642 | 403,995-473,354 | ~54-60% |
-| 10k-line React/TSX edit | 917,137 | 545,456 | 40.5% |
+| Large CSS visual edit, Tokenless OFF -> ON | 1,017,642 | 403,995-473,354 | ~54-60% |
+| 10k-line React/TSX edit, Tokenless OFF -> ON | 917,137 | 545,456 | 40.5% |
+| Multifile React dashboard, Lean + Tokenless OFF -> ON | 628,261 | 512,521 | 18.4% |
+| Multifile React dashboard, Task/Plan tools on -> Lean default | 1,524,894 | 1,087,753 | 28.7% |
 
 The CSS task is the strongest path today: large style files have stable editable
 summaries, and repeated runs reduced request-body tokens from about 1.02M to
@@ -226,6 +245,11 @@ The 10k-line React/TSX task shows the large-source path working in a realistic
 single-file app edit: request-body tokens dropped from 917,137 to 545,456 in a
 clean true-OFF comparison. TSX gains are real but more trajectory-sensitive than
 CSS because the model may carry the read packet through many follow-up requests.
+
+The multifile dashboard task is closer to an agentic product-polish run across
+components and CSS. In the default Lean launcher, Tokenless ON reduced request
+tokens from 628,261 to 512,521. Separately, disabling Claude Code Task/Plan
+tools reduced request tokens from 1,524,894 to 1,087,753 in the same task family.
 
 A valid OFF run must show `TOKENLESS-READ-PACKET: request=0` and
 `request_saved_estimate: 0`; otherwise it is not a true OFF comparison.

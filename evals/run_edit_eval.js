@@ -8,6 +8,7 @@ const { spawnSync } = require('child_process');
 
 const repoRoot = path.resolve(__dirname, '..');
 const postToolUse = path.join(repoRoot, 'plugins', 'claude-code', 'scripts', 'post_tool_use.js');
+const preToolUse = path.join(repoRoot, 'plugins', 'claude-code', 'scripts', 'pre_tool_use.js');
 const tokenless = path.join(repoRoot, 'plugins', 'claude-code', 'bin', 'tokenless');
 const dataDir = path.join(os.tmpdir(), 'tokenless-edit-eval');
 
@@ -42,11 +43,40 @@ function runTokenless(args) {
   });
 }
 
+function runPreHook({ toolName, toolInput }) {
+  const payload = JSON.stringify({
+    tool_name: toolName,
+    tool_input: toolInput
+  });
+
+  return spawnSync(process.execPath, [preToolUse], {
+    input: payload,
+    encoding: 'utf8',
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CLAUDE_PLUGIN_ROOT: path.join(repoRoot, 'plugins', 'claude-code'),
+      CLAUDE_PLUGIN_DATA: dataDir,
+      TOKENLESS_STATS_SOURCE: 'eval'
+    }
+  });
+}
+
 function parseUpdatedToolOutput(stdout) {
   if (!stdout || !stdout.trim()) return '';
   try {
     const parsed = JSON.parse(stdout);
     return JSON.stringify(parsed.hookSpecificOutput && parsed.hookSpecificOutput.updatedToolOutput || parsed);
+  } catch (err) {
+    return stdout;
+  }
+}
+
+function parsePermissionReason(stdout) {
+  if (!stdout || !stdout.trim()) return '';
+  try {
+    const parsed = JSON.parse(stdout);
+    return String(parsed.hookSpecificOutput && parsed.hookSpecificOutput.permissionDecisionReason || '');
   } catch (err) {
     return stdout;
   }
@@ -94,6 +124,15 @@ function main() {
   fs.writeFileSync(cssPath, '.tokenless-real-card { border-radius: 48px; }\n');
   fs.writeFileSync(jsPath, 'console.log("source");\n');
   fs.writeFileSync(mdPath, '# fixture\n');
+
+  const blockedLargeWrite = runPreHook({
+    toolName: 'Write',
+    toolInput: {
+      file_path: cssPath,
+      content: Array.from({ length: 260 }, (_, i) => `.card-${i} { color: #22d3ee; }`).join('\n')
+    }
+  });
+  const blockedLargeWriteReason = parsePermissionReason(blockedLargeWrite.stdout);
 
   const successEdit = runHook({
     toolName: 'Edit',
@@ -168,6 +207,7 @@ function main() {
     ['successful CSS Write emits TOKENLESS-WRITE-PACKET', successCssWriteOutput.includes('TOKENLESS-WRITE-PACKET/0.1')],
     ['successful CSS Write omits raw edit payload fields', !containsRawEditPayload(successCssWriteOutput)],
     ['successful source JS Write passes through', !successJsWriteOutput.includes('TOKENLESS-WRITE-PACKET/0.1')],
+    ['large existing Write is blocked before execution', blockedLargeWriteReason.includes('TOKENLESS-INPUT-GUARD/0.1') && blockedLargeWriteReason.includes('Write overwrite')],
     ['small Edit passes through', !smallEditOutput.includes('TOKENLESS-EDIT-PACKET/0.1')],
     ['failed Write passes through without write packet', !failedWriteOutput.includes('TOKENLESS-WRITE-PACKET/0.1')],
     ['stats records edit-packet reducer', stats.includes('edit-packet')],

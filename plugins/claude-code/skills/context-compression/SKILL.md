@@ -72,14 +72,19 @@ Large CSS visual-edit protocol:
 8. Do not make “extra premium” changes outside the asked surface, such as mouse-tracking JS, custom scrollbars in HTML, or new runtime scripts, unless requested.
 9. Final answer should be 3-5 concise bullets only; do not write a long change diary.
 
-Large JS/TS/React edit protocol:
-1. After a `TOKENLESS-READ-PACKET` for `.js`, `.jsx`, `.ts`, or `.tsx`, do not perform a second full-file read.
+Large source edit protocol:
+1. After a `TOKENLESS-READ-PACKET` for `.js`, `.jsx`, `.ts`, `.tsx`, `.py`, `.vue`, or `.svelte`, do not perform a second full-file read.
 2. Do one minimal native `Read` only to register editor state if you plan to edit.
-3. Use `Source map` and `Editable snippets` as the first-pass edit surface.
+3. Use `Source map`, `SFC sections`, `Project file hints`, and `Editable snippets` as the first-pass edit surface.
 4. Make 4-8 bounded `Edit` calls from the snippets; do not remap the file with `grep`, `rg`, `sed`, or repeated `Read` calls.
 5. If exact `old_string` is missing, use at most two `tokenless expand` lookups before editing.
 6. Do not run tests, build, typecheck, browser validation, or package commands unless the user explicitly asks for validation.
 7. Final answer should be 3-5 concise bullets only; do not write a long change diary.
+
+For multi-file JS/TS/Python/Vue/Svelte tasks:
+1. Use `Project file hints` before running `ls`, `find`, or broad `rg`.
+2. If a hinted adjacent file must be edited, read that exact file; do not map the whole project first.
+3. Keep the first pass to the requested file plus clearly referenced adjacent files only.
 
 Trajectory budget:
 - Goal: one packet read, one minimal registration `Read` when editing, zero artifact expands unless required, one bounded serial `Edit` phase, concise final answer.

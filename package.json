@@ -49,6 +49,7 @@
     "tokenless:api-probe:stats": "node plugins/claude-code/bin/tokenless api-probe stats --dir /Users/mac/.tokenless/api-bodies-realtest",
     "tokenless:real-check": "node scripts/real_check.js",
     "tokenless:status:project": "node plugins/claude-code/bin/tokenless status --project",
+    "tokenless:launch": "node plugins/claude-code/bin/tokenless launch",
     "tokenless:print-hooks": "node plugins/claude-code/bin/tokenless print-hooks",
     "tokenless:install": "node plugins/claude-code/bin/tokenless install-hooks --user",
     "tokenless:install:dry-run": "node plugins/claude-code/bin/tokenless install-hooks --user --dry-run",

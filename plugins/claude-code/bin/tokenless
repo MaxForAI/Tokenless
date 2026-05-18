@@ -39,6 +39,7 @@ function usage() {
   console.log('  tokenless repair-hooks --user [--project] [--dry-run]');
   console.log('  tokenless install-commands [--user] [--data-dir <dir>] [--dry-run]');
   console.log('  tokenless uninstall-commands [--user] [--dry-run]');
+  console.log('  tokenless launch [--claude-bin <path>] [--allow-task-tools] [--print] [-- <claude-args...>]');
   console.log('  tokenless api-usage [--source <dir>] [--since <24h|7d>]');
   console.log('  tokenless api-probe start|stop|inspect|latest|stats [--dir <dir>] [--name <slug>] [--data-dir <dir>] [--keyword <text>] [--show-snippet]');
   console.log('  tokenless benchmark-copy <fixture> [--source <dir>] [--out-root <dir>] [--name <slug>] [--file <path>]');
@@ -77,6 +78,90 @@ function sanitizeSlug(value) {
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '') || 'run';
+}
+
+const TASK_PLAN_TOOLS = [
+  'TaskCreate',
+  'TaskUpdate',
+  'TaskList',
+  'TaskGet',
+  'EnterPlanMode',
+  'ExitPlanMode'
+];
+
+function parseLaunchArgs(args) {
+  const parsed = {
+    claudeBin: process.env.CLAUDE_BIN || 'claude',
+    allowTaskTools: process.env.TOKENLESS_ALLOW_TASK_TOOLS === '1',
+    print: false,
+    claudeArgs: []
+  };
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--') {
+      parsed.claudeArgs.push(...args.slice(i + 1));
+      break;
+    }
+    if (arg === '--claude-bin') {
+      parsed.claudeBin = args[++i];
+      continue;
+    }
+    if (arg === '--allow-task-tools') {
+      parsed.allowTaskTools = true;
+      continue;
+    }
+    if (arg === '--print' || arg === '--dry-run') {
+      parsed.print = true;
+      continue;
+    }
+    parsed.claudeArgs.push(arg);
+  }
+
+  if (!parsed.claudeBin) {
+    parsed.claudeBin = 'claude';
+  }
+  return parsed;
+}
+
+function buildLaunchCommand(parsed) {
+  const command = [parsed.claudeBin, ...parsed.claudeArgs];
+  if (!parsed.allowTaskTools) {
+    command.push('--disallowedTools', TASK_PLAN_TOOLS.join(','));
+  }
+  return command;
+}
+
+function printLaunch(parsed, command) {
+  console.log('TOKENLESS-LAUNCH/0.1');
+  console.log(`claude_bin: ${parsed.claudeBin}`);
+  console.log(`task_plan_tools: ${parsed.allowTaskTools ? 'allowed' : 'disabled'}`);
+  console.log(`command: ${command.map(shellQuote).join(' ')}`);
+}
+
+function launchClaude(args) {
+  const parsed = parseLaunchArgs(args);
+  const command = buildLaunchCommand(parsed);
+  if (parsed.print) {
+    printLaunch(parsed, command);
+    return;
+  }
+
+  const child = spawn(command[0], command.slice(1), {
+    stdio: 'inherit',
+    env: process.env
+  });
+  child.on('exit', (code, signal) => {
+    if (signal) {
+      process.kill(process.pid, signal);
+      return;
+    }
+    process.exit(code == null ? 1 : code);
+  });
+  child.on('error', (err) => {
+    console.error(`tokenless launch failed: ${err.message}`);
+    process.exit(1);
+  });
 }
 
 function parseShowOrExpandArgs(args) {
@@ -1149,7 +1234,7 @@ function printBenchmarkCommands({ fixture, onFile, offFile, apiPrefix }) {
   console.log('mkdir -p "$TOKENLESS_API_ON_DIR"');
   console.log('export CLAUDE_CODE_ENABLE_TELEMETRY=1');
   console.log('export OTEL_LOG_RAW_API_BODIES="file:$TOKENLESS_API_ON_DIR"');
-  console.log('./claude-zenmux.sh');
+  console.log('node plugins/claude-code/bin/tokenless launch');
   console.log('```');
   console.log('');
   console.log('ON file:');
@@ -1163,7 +1248,7 @@ function printBenchmarkCommands({ fixture, onFile, offFile, apiPrefix }) {
   console.log('mkdir -p "$TOKENLESS_API_OFF_DIR"');
   console.log('export CLAUDE_CODE_ENABLE_TELEMETRY=1');
   console.log('export OTEL_LOG_RAW_API_BODIES="file:$TOKENLESS_API_OFF_DIR"');
-  console.log('./claude-zenmux.sh');
+  console.log('node plugins/claude-code/bin/tokenless launch');
   console.log('```');
   console.log('');
   console.log('OFF file:');
@@ -2576,6 +2661,11 @@ async function main() {
     const parsed = parseApiUsageArgs(args.slice(1));
     printApiUsage(parsed);
     process.exit(0);
+  }
+
+  if (command === 'launch' || command === 'claude') {
+    launchClaude(args.slice(1));
+    return;
   }
 
   if (command === 'api-probe') {

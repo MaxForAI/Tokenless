@@ -45,6 +45,18 @@ function main() {
   assertContains(probe, 'export TOKENLESS_API_PROBE_DIR=', 'api-probe');
   assertContains(probe, 'export OTEL_LOG_RAW_API_BODIES=\"file:$TOKENLESS_API_PROBE_DIR\"', 'api-probe');
 
+  const leanLaunch = run(['launch', '--print', '--claude-bin', '/tmp/fake-claude', '--', '--version']);
+  assertContains(leanLaunch, 'TOKENLESS-LAUNCH/0.1', 'launch');
+  assertContains(leanLaunch, 'task_plan_tools: disabled', 'launch');
+  assertContains(leanLaunch, '--disallowedTools', 'launch');
+  assertContains(leanLaunch, 'TaskCreate,TaskUpdate,TaskList,TaskGet,EnterPlanMode,ExitPlanMode', 'launch');
+
+  const taskLaunch = run(['launch', '--print', '--claude-bin', '/tmp/fake-claude'], { env: { TOKENLESS_ALLOW_TASK_TOOLS: '1' } });
+  assertContains(taskLaunch, 'task_plan_tools: allowed', 'launch allow');
+  if (taskLaunch.includes('--disallowedTools')) {
+    throw new Error(`launch allow: unexpected --disallowedTools\n${taskLaunch}`);
+  }
+
   if (fs.existsSync(originalFixture)) {
     const copy = run(['benchmark-copy', 'aurora-10k-tsx', '--out-root', tmpRoot, '--name', 'aurora-smoke']);
     assertContains(copy, 'TOKENLESS-BENCHMARK-COPY/0.1', 'benchmark-copy');
