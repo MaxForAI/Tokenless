@@ -1,9 +1,12 @@
 # Changelog
 
-## Unreleased
+## v0.2.0 - 2026-05-18
 
 ### Added
 
+- `tokenless launch` starts Claude Code through a Tokenless Lean session by default.
+- Lean launch mode disables high-overhead Claude Code Task/Plan tools while keeping normal read, edit, write, and bash tools available.
+- `TOKENLESS_ALLOW_TASK_TOOLS=1 tokenless launch` restores Claude Code's native task list and plan-mode UI for a session.
 - `TOKENLESS_MODE=off|false|0|disabled` now disables Tokenless hook behavior at the hook entrypoints, enabling true OFF benchmark runs.
 - `tokenless status` now prints the current Tokenless mode and whether it came from `TOKENLESS_MODE`.
 - `tokenless benchmark-copy aurora-10k-tsx` creates fresh ON/OFF benchmark copies and prints matching launch/stat commands.
@@ -12,10 +15,13 @@
 - Large JS/TS source packets now include bounded project file hints for nearby/imported source, style, and data files.
 - Large Python files now use source-oriented read packets with imports, classes, functions, snippets, and nearby file hints.
 - Large Vue/Svelte single-file components now use component-oriented read packets with template/script/style sections, interaction hints, snippets, and local component hints.
+- Large existing `Write` overwrites are blocked before execution unless explicitly allowed, pushing agents toward bounded edits.
+- Large successful `Edit`, `MultiEdit`, and low-risk `Write` results emit compact edit/write packets while preserving raw artifacts locally.
 
 ### Documentation
 
 - Added API-body benchmark results for large CSS visual edits and a 10k-line React/TSX edit.
+- Added API-body benchmark results for the multifile React dashboard Lean launcher and Tokenless ON/OFF runs.
 - Added `docs/benchmarking.md` with true-ON/OFF setup, raw API body capture instructions, and benchmark caveats.
 
 ## v0.1.0-mvp

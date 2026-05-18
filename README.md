@@ -150,6 +150,22 @@ acc --help
 
 `tokenless` is the preferred public command. `acc` remains available as a short compatibility alias and protocol-oriented command.
 
+Recommended local setup from a checkout:
+
+```bash
+npm install
+npm link
+tokenless install-hooks --user
+tokenless launch
+```
+
+If Claude Code is not available as `claude` on your `PATH`, point Tokenless at
+the local Claude binary:
+
+```bash
+CLAUDE_BIN=/path/to/claude tokenless launch
+```
+
 Start Claude Code through the Tokenless launcher to use the default Lean session
 profile:
 
