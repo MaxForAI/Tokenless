@@ -6,6 +6,11 @@ It is not a generic summarizer. Tokenless keeps raw output as a local artifact a
 
 The current wire format is `TOKENLESS-PACKET/0.1`.
 
+## Contributors
+
+- Max Liu
+- Codex, AI coding assistant
+
 ## What it handles now
 
 - Test logs: `npm test`, `pytest`, `go test`, `cargo test`
