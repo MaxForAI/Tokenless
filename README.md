@@ -6,6 +6,55 @@ It is not a generic summarizer. Tokenless keeps raw output as a local artifact a
 
 The current wire format is `TOKENLESS-PACKET/0.1`.
 
+## Quickstart
+
+```bash
+git clone https://github.com/MaxLiu199909/Tokenless.git
+cd Tokenless
+npm install
+npm link
+tokenless install-hooks --user
+tokenless launch
+```
+
+If Claude Code is not available as `claude` on your `PATH`, set `CLAUDE_BIN`:
+
+```bash
+CLAUDE_BIN=/path/to/claude tokenless launch
+```
+
+Check the active hook and mode:
+
+```bash
+tokenless status --user
+```
+
+## Minimal demo
+
+When Claude tries to read a large low-risk file, Tokenless keeps the raw file
+locally and sends a compact packet instead:
+
+```text
+TOKENLESS-READ-PACKET/0.1
+file: /path/to/src/App.tsx
+artifact_id: ctx_20260518_abc123
+summary: large TSX source packet with imports, declarations, snippets, and nearby files
+```
+
+The raw content is still available locally:
+
+```bash
+tokenless latest --data-dir ~/.tokenless
+tokenless expand latest --around "DashboardShell" --data-dir ~/.tokenless
+tokenless expand latest --lines 120:170 --data-dir ~/.tokenless
+```
+
+For a local smoke demo without launching Claude Code:
+
+```bash
+npm run eval:complex
+```
+
 ## Contributors
 
 - Max Liu
@@ -101,7 +150,7 @@ partial
 
 The edit/write packet does not claim the edit is semantically correct. It only confirms the tool completed successfully, records the raw artifact, and tells the agent that any previous read packet for the file should be treated as stale.
 
-## Quick demo
+## Eval demo
 
 ```bash
 git clone https://github.com/MaxLiu199909/Tokenless.git
