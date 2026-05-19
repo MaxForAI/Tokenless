@@ -28,6 +28,24 @@ function run(args, options = {}) {
   return `${result.stdout || ''}${result.stderr || ''}`;
 }
 
+function runScript(scriptPath, input, options = {}) {
+  const result = spawnSync(process.execPath, [scriptPath], {
+    cwd: repoRoot,
+    input,
+    env: { ...process.env, ...(options.env || {}) },
+    encoding: 'utf8'
+  });
+  if (result.status !== 0) {
+    throw new Error([
+      `script failed: ${scriptPath}`,
+      `status: ${result.status}`,
+      result.stdout,
+      result.stderr
+    ].filter(Boolean).join('\n'));
+  }
+  return `${result.stdout || ''}${result.stderr || ''}`;
+}
+
 function assertContains(text, needle, label) {
   if (!text.includes(needle)) {
     throw new Error(`${label}: missing ${needle}\n${text}`);
@@ -56,6 +74,36 @@ function main() {
   if (taskLaunch.includes('--disallowedTools')) {
     throw new Error(`launch allow: unexpected --disallowedTools\n${taskLaunch}`);
   }
+
+  const styleSet = run(['style', 'chat', '--data-dir', tmpRoot]);
+  assertContains(styleSet, 'TOKENLESS-STYLE/0.1', 'style set');
+  assertContains(styleSet, 'configured_style: chat', 'style set');
+  assertContains(styleSet, 'effective_style: chat', 'style set');
+
+  const styleStatus = run(['style', 'status', '--data-dir', tmpRoot]);
+  assertContains(styleStatus, 'effective_style: chat', 'style status');
+
+  const userPromptHook = path.join(repoRoot, 'plugins', 'claude-code', 'scripts', 'user_prompt_submit.js');
+  const hookOutput = runScript(userPromptHook, JSON.stringify({ prompt: 'continue' }), { env: { CLAUDE_PLUGIN_DATA: tmpRoot } });
+  assertContains(hookOutput, 'TOKENLESS STYLE ACTIVE (chat)', 'style hook');
+
+  const styleOff = run(['style', 'off', '--data-dir', tmpRoot]);
+  assertContains(styleOff, 'effective_style: off', 'style off');
+
+  const styleAlias = run(['style', 'silent', '--data-dir', tmpRoot]);
+  assertContains(styleAlias, 'configured_style: chat', 'style alias');
+  assertContains(styleAlias, 'TOKENLESS STYLE ACTIVE (chat)', 'style alias');
+
+  const styleBenchmark = run(['style-benchmark', 'start', 'coding', '--data-dir', tmpRoot, '--name', 'style-smoke']);
+  assertContains(styleBenchmark, 'TOKENLESS-STYLE-BENCHMARK/0.1', 'style benchmark');
+  assertContains(styleBenchmark, 'style: coding', 'style benchmark');
+  assertContains(styleBenchmark, 'TOKENLESS_STYLE_BENCH=\"coding\"', 'style benchmark');
+  assertContains(styleBenchmark, 'Stats command:', 'style benchmark');
+
+  const styleCoding = run(['style', 'coding', '--data-dir', tmpRoot]);
+  assertContains(styleCoding, 'configured_style: coding', 'style coding');
+  assertContains(styleCoding, 'TOKENLESS STYLE ACTIVE (coding)', 'style coding');
+  assertContains(styleCoding, 'D2a <core>', 'style coding');
 
   const commands = run(['install-commands', '--dry-run', '--commands-dir', tmpRoot]);
   assertContains(commands, 'TOKENLESS-INSTALL-COMMANDS/0.1', 'install-commands');

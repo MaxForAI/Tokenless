@@ -5,8 +5,21 @@
 ### Changed
 
 - Reworked Claude Code slash commands into one top-level `/tokenless` command.
-- Reserved `/tokenless style <terse|caveman|reviewer|wenyan|off>` as the future output-style profile entry point.
+- Reworked the public style surface to `/tokenless style <chat|coding|off>`, with `chat` as the default readable compression mode and `coding` as the dense structured coding mode.
+- Added picker-friendly `/tokenless-style-chat`, `/tokenless-style-coding`, and `/tokenless-style-off` commands for Claude Code.
 - Stopped installing placeholder or overly granular slash commands; uninstall now also removes older `/tokenless-mode`, `/tokenless-latest`, `/tokenless-expand`, and `/tokenless-doctor` files if present.
+
+### Added
+
+- Added a `UserPromptSubmit` hook that injects a short style reminder only when a Tokenless style profile is active.
+- Added `tokenless style` CLI status/set commands backed by `~/.tokenless/style.json`.
+- Documented output-style benchmark results: public `chat` reduced response tokens by 45.2%, and public `coding` reduced response tokens by 50.0% versus `off` in the six-prompt API-body run.
+- Added an experimental `wire` style implementing the TLW1 one-line protocol for future model-output compression experiments.
+- Added `tokenless style-benchmark start <style>` to print repeatable API-body capture, prompt, and stats commands for output-style experiments.
+- Added an experimental `dense` style implementing the D1 short-code MVP for token/latency-first output compression experiments.
+- Documented `wire` and `dense` benchmark results; `dense` nearly tied `silent` on response tokens and subjectively felt faster in interactive use.
+- Added `dense2`, a D2 short-code experiment with action-specific templates and default-field omission, so D1 and D2 can be benchmarked side by side.
+- Documented `dense2` benchmark results: 50.0% response-token reduction versus `off`, beating `silent` by 8.7% and D1 `dense` by 9.0%.
 
 ## v0.2.1 - 2026-05-18
 

@@ -254,6 +254,8 @@ tokenless api-usage --since 24h
 tokenless show latest --data-dir ~/.tokenless
 tokenless expand latest --around "Regression family 44" --data-dir ~/.tokenless
 tokenless clean --data-dir ~/.tokenless --keep 100 --dry-run
+tokenless style status
+tokenless style-benchmark start coding
 tokenless benchmark-copy aurora-10k-tsx
 ```
 
@@ -282,10 +284,10 @@ node plugins/claude-code/bin/tokenless api-probe stop
 
 Raw API bodies can contain full prompts, tool outputs, and sensitive local context. Keep this disabled unless you are verifying what enters model context.
 
-### Lean mode: Task/Plan tools
+### Launcher guard: Task/Plan tools
 
-The `tokenless launch` command defaults to a lean Claude Code session: it
-disables high-overhead Task/Plan tools (`TaskCreate`, `TaskUpdate`,
+The `tokenless launch` command defaults to a Claude Code session with
+high-overhead Task/Plan tools disabled (`TaskCreate`, `TaskUpdate`,
 `TaskList`, `TaskGet`, `EnterPlanMode`, and `ExitPlanMode`) while keeping normal
 execution tools such as read, edit, write, and bash available.
 
@@ -332,8 +334,8 @@ hook-side savings estimates.
 | --- | ---: | ---: | ---: |
 | Large CSS visual edit, Tokenless OFF -> ON | 1,017,642 | 403,995-473,354 | ~54-60% |
 | 10k-line React/TSX edit, Tokenless OFF -> ON | 917,137 | 545,456 | 40.5% |
-| Multifile React dashboard, Lean + Tokenless OFF -> ON | 628,261 | 512,521 | 18.4% |
-| Multifile React dashboard, Task/Plan tools on -> Lean default | 1,524,894 | 1,087,753 | 28.7% |
+| Multifile React dashboard, default launcher + Tokenless OFF -> ON | 628,261 | 512,521 | 18.4% |
+| Multifile React dashboard, Task/Plan tools on -> default launcher | 1,524,894 | 1,087,753 | 28.7% |
 
 The CSS task is the strongest path today: large style files have stable editable
 summaries, and repeated runs reduced request-body tokens from about 1.02M to
@@ -345,7 +347,7 @@ clean true-OFF comparison. TSX gains are real but more trajectory-sensitive than
 CSS because the model may carry the read packet through many follow-up requests.
 
 The multifile dashboard task is closer to an agentic product-polish run across
-components and CSS. In the default Lean launcher, Tokenless ON reduced request
+components and CSS. In the default launcher, Tokenless ON reduced request
 tokens from 628,261 to 512,521. Separately, disabling Claude Code Task/Plan
 tools reduced request tokens from 1,524,894 to 1,087,753 in the same task family.
 
@@ -375,11 +377,52 @@ This installs user-level Claude Code commands:
 
 ```text
 /tokenless
-/tokenless style <terse|caveman|reviewer|wenyan|off>
+/tokenless-style-chat
+/tokenless-style-coding
+/tokenless-style-off
 ```
 
 - `/tokenless` shows a compact Tokenless dashboard: hook status, mode, savings, packet counts, pending gates, and latest artifact.
-- `/tokenless style ...` is reserved for future output style profiles such as `terse`, `caveman`, `reviewer`, and `wenyan`. It does not change compression behavior yet.
+- `/tokenless style ...` controls the same persistent output style profile from the top-level command.
+- `/tokenless-style-*` commands are picker-friendly shortcuts for Claude Code's slash command menu.
+- Style is separate from compression mode: `TOKENLESS_MODE=off` still disables Tokenless hook behavior for true OFF benchmark runs.
+
+Style profiles:
+
+- `chat`: default shortest readable output. Internally this uses the strongest human-readable compression behavior tested so far.
+- `coding`: dense structured output for coding workflows. Internally this uses the D2 protocol that had the lowest measured response-token count.
+- `off`: normal model style with no Tokenless style injection.
+
+The default style is `chat`. Use `/tokenless style off` to return to normal
+model output, or `/tokenless style coding` for the structured coding profile.
+Legacy names such as `lean`, `silent`, `wire`, `dense`, and `dense2` are accepted
+as compatibility aliases, but the public surface is `chat`, `coding`, and `off`.
+
+The style switch is stored under the Tokenless data directory, usually `~/.tokenless/style.json`. It takes effect through the installed `UserPromptSubmit` hook, so run `tokenless install-hooks --user` and restart Claude Code if style changes do not apply.
+
+Output style benchmark from a six-prompt Claude Code API-body run:
+
+| Style | Response tokens | Responses | Avg / response | Change vs off |
+| --- | ---: | ---: | ---: | ---: |
+| `off` | 2,168 | 6 | 361 | baseline |
+| `chat` | 1,189 | 6 | 198 | -45.2% |
+| `coding` | 1,085 | 6 | 181 | -50.0% |
+
+`chat` maps to the previous `silent` experiment because it stayed readable while
+beating `lean` by 17.0% on response tokens. `coding` maps to the previous
+`dense2` experiment because it was the lowest-token structured coding profile,
+beating `chat` by another 8.7%.
+
+See [docs/wire-protocol.md](docs/wire-protocol.md) for the Tokenless Wire
+Protocol concept and experiment plan.
+
+Generate repeatable style benchmark commands:
+
+```bash
+tokenless style-benchmark start chat
+tokenless style-benchmark start coding
+tokenless style-benchmark start off
+```
 
 Restart Claude Code after installing slash commands. If you previously installed an older Tokenless command set, `tokenless uninstall-commands --user` removes the current `/tokenless` command and old placeholders such as `/tokenless-mode`, `/tokenless-latest`, `/tokenless-expand`, and `/tokenless-doctor`.
 

@@ -24,6 +24,13 @@ const {
   expandArtifactLines,
   formatArtifactPointer
 } = require('../lib/artifact_store');
+const {
+  VALID_STYLES,
+  normalizeStyle,
+  readStyleConfig,
+  writeStyleConfig,
+  formatStyleContext
+} = require('../lib/style_config');
 
 function usage() {
   console.log('Usage:');
@@ -40,6 +47,8 @@ function usage() {
   console.log('  tokenless install-commands [--user] [--data-dir <dir>] [--dry-run]');
   console.log('  tokenless uninstall-commands [--user] [--dry-run]');
   console.log('  tokenless launch [--claude-bin <path>] [--allow-task-tools] [--print] [-- <claude-args...>]');
+  console.log('  tokenless style <status|chat|coding|off> [--data-dir <dir>]');
+  console.log('  tokenless style-benchmark start <chat|coding|off> [--name <slug>] [--data-dir <dir>]');
   console.log('  tokenless api-usage [--source <dir>] [--since <24h|7d>]');
   console.log('  tokenless api-probe start|stop|inspect|latest|stats [--dir <dir>] [--name <slug>] [--data-dir <dir>] [--keyword <text>] [--show-snippet]');
   console.log('  tokenless benchmark-copy <fixture> [--source <dir>] [--out-root <dir>] [--name <slug>] [--file <path>]');
@@ -304,6 +313,60 @@ function parseDoctorArgs(argv) {
   return { dataDir };
 }
 
+function parseStyleArgs(argv) {
+  let dataDir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.tokenless');
+  const positional = [];
+
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--data-dir') {
+      dataDir = stripQuotes(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (argv[i] === '--') {
+      continue;
+    }
+    positional.push(argv[i]);
+  }
+
+  let action = positional[0] || 'status';
+  if (action === 'set') {
+    action = positional[1] || 'status';
+  }
+  return { dataDir, action };
+}
+
+function parseStyleBenchmarkArgs(argv) {
+  const action = argv[0] || 'start';
+  let dataDir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.tokenless');
+  let name = null;
+  const positional = [];
+
+  for (let i = 1; i < argv.length; i++) {
+    if (argv[i] === '--data-dir') {
+      dataDir = stripQuotes(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (argv[i] === '--name') {
+      name = stripQuotes(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (argv[i] === '--') {
+      continue;
+    }
+    positional.push(argv[i]);
+  }
+
+  return {
+    action,
+    style: positional[0] || 'coding',
+    dataDir,
+    name
+  };
+}
+
 function parseListArgs(argv) {
   let dataDir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.tokenless');
   let limit = 20;
@@ -555,6 +618,7 @@ function runDoctor(dataDir) {
   const postToolPath = path.join(pluginRoot, 'scripts', 'post_tool_use.js');
   const postToolFailurePath = path.join(pluginRoot, 'scripts', 'post_tool_failure.js');
   const postToolProbePath = path.join(pluginRoot, 'scripts', 'post_tool_probe.js');
+  const userPromptSubmitPath = path.join(pluginRoot, 'scripts', 'user_prompt_submit.js');
   const userSettingsPath = path.join(os.homedir(), '.claude', 'settings.json');
 
   console.log('TOKENLESS-DOCTOR/0.1');
@@ -568,7 +632,7 @@ function runDoctor(dataDir) {
   checkReadableJson('plugin manifest', manifestPath);
   checkReadableJson('hooks json', hooksPath);
 
-  for (const filePath of [preToolPath, postToolPath, postToolFailurePath, postToolProbePath]) {
+  for (const filePath of [preToolPath, postToolPath, postToolFailurePath, postToolProbePath, userPromptSubmitPath]) {
     if (fs.existsSync(filePath)) okLine('script exists', filePath);
     else failLine('script exists', filePath);
   }
@@ -763,6 +827,16 @@ function buildHooksObject(pluginRoot) {
             }
           ]
         }
+      ],
+      UserPromptSubmit: [
+        {
+          hooks: [
+            {
+              type: 'command',
+              command: `node "${path.join(pluginRoot, 'scripts', 'user_prompt_submit.js')}"`
+            }
+          ]
+        }
       ]
     }
   };
@@ -780,7 +854,8 @@ function isTokenlessHookEntry(entry) {
   return text.includes('/plugins/claude-code/scripts/pre_tool_use.js') ||
     text.includes('/plugins/claude-code/scripts/post_tool_use.js') ||
     text.includes('/plugins/claude-code/scripts/post_tool_failure.js') ||
-    text.includes('/plugins/claude-code/scripts/post_tool_probe.js');
+    text.includes('/plugins/claude-code/scripts/post_tool_probe.js') ||
+    text.includes('/plugins/claude-code/scripts/user_prompt_submit.js');
 }
 
 function normalizePathForCompare(value) {
@@ -859,7 +934,8 @@ function getHookInstallStatus(settings) {
     'PostToolUse:Edit': postToolUse.some((entry) => entry && entry.matcher === 'Edit' && isTokenlessHookEntry(entry)),
     'PostToolUse:MultiEdit': postToolUse.some((entry) => entry && entry.matcher === 'MultiEdit' && isTokenlessHookEntry(entry)),
     'PostToolUse:Write': postToolUse.some((entry) => entry && entry.matcher === 'Write' && isTokenlessHookEntry(entry)),
-    PostToolUseFailure: (Array.isArray(hooks.PostToolUseFailure) ? hooks.PostToolUseFailure : []).some(isTokenlessHookEntry)
+    PostToolUseFailure: (Array.isArray(hooks.PostToolUseFailure) ? hooks.PostToolUseFailure : []).some(isTokenlessHookEntry),
+    UserPromptSubmit: (Array.isArray(hooks.UserPromptSubmit) ? hooks.UserPromptSubmit : []).some(isTokenlessHookEntry)
   };
   const expected = Object.keys(detail);
 
@@ -1070,22 +1146,35 @@ function getSlashCommandsDir(options = {}) {
 function buildSlashCommands({ cliPath, dataDir }) {
   const cli = shellQuote(cliPath);
   const dir = shellQuote(dataDir);
+  const styleCommand = ({ style, description }) => [
+    '---',
+    `description: ${description}`,
+    'allowed-tools: Bash',
+    '---',
+    '',
+    'Run:',
+    '',
+    '```bash',
+    `node ${cli} style ${style} --data-dir ${dir}`,
+    '```',
+    '',
+    'Then report the printed `effective_style`, `style_source`, and whether the user must restart Claude Code.'
+  ].join('\n');
 
   return {
     'tokenless.md': [
       '---',
-      'description: Show Tokenless status, savings, and latest artifact',
-      'argument-hint: "[style <terse|caveman|reviewer|wenyan|off>]"',
+      'description: Show Tokenless status, savings, latest artifact, and style controls',
+      'argument-hint: "[style <status|chat|coding|off>]"',
       'allowed-tools: Bash',
       '---',
       '',
-      'If the first argument is `style`, do not change settings yet. Explain briefly:',
+      'If the first argument is `style`:',
       '',
-      '```text',
-      '/tokenless style is reserved for future output style profiles.',
-      'Planned styles: terse, caveman, reviewer, wenyan, off.',
-      'It does not change Tokenless compression behavior yet.',
-      '```',
+      '- If a style is provided, run `node ' + cli + ' style <style> --data-dir ' + dir + '`.',
+      '- If no style is provided, run `node ' + cli + ' style status --data-dir ' + dir + '`.',
+      '- Report the printed `effective_style`, `style_source`, and whether the user must restart Claude Code.',
+      '- Do not run stats/latest for style commands.',
       '',
       'Otherwise, show a compact Tokenless dashboard.',
       '',
@@ -1111,8 +1200,106 @@ function buildSlashCommands({ cliPath, dataDir }) {
       '```',
       '',
       'Do not expand raw artifacts unless the user asks for details.'
-    ].join('\n')
+    ].join('\n'),
+    'tokenless-style-chat.md': styleCommand({
+      style: 'chat',
+      description: 'Set Tokenless style to chat: shortest readable output'
+    }),
+    'tokenless-style-coding.md': styleCommand({
+      style: 'coding',
+      description: 'Set Tokenless style to coding: dense structured output'
+    }),
+    'tokenless-style-off.md': styleCommand({
+      style: 'off',
+      description: 'Disable Tokenless output style injection'
+    })
   };
+}
+
+function printStyle({ dataDir, action }) {
+  const normalized = normalizeStyle(action);
+  const isStatus = ['status', 'current', 'show'].includes(String(action || '').toLowerCase());
+
+  if (!isStatus && !normalized) {
+    console.error(`invalid style: ${action}`);
+    console.error(`valid styles: ${VALID_STYLES.join(', ')}, status`);
+    process.exit(1);
+  }
+
+  let configured = null;
+  if (!isStatus) {
+    configured = writeStyleConfig({ dataDir, style: normalized });
+  }
+
+  const effective = readStyleConfig(dataDir);
+  console.log('TOKENLESS-STYLE/0.1');
+  console.log(`data_dir: ${dataDir}`);
+  console.log(`style_path: ${effective.path}`);
+  console.log(`action: ${isStatus ? 'status' : 'set'}`);
+  if (configured) {
+    console.log(`configured_style: ${configured.style}`);
+    console.log(`configured_at: ${configured.updated_at}`);
+  }
+  console.log(`effective_style: ${effective.style}`);
+  console.log(`style_source: ${effective.source}`);
+  console.log(`updated_at: ${effective.updated_at || '(none)'}`);
+  console.log(`available_styles: ${VALID_STYLES.join(', ')}`);
+  console.log(`context: ${effective.style === 'off' ? '(none)' : formatStyleContext(effective.style)}`);
+  if (!isStatus) {
+    console.log('restart_required: no, if UserPromptSubmit hook is already installed; otherwise run tokenless install-hooks --user and restart Claude Code');
+  }
+}
+
+function printStyleBenchmark({ action, style, dataDir, name }) {
+  if (action !== 'start') {
+    console.error('tokenless style-benchmark supports: start <chat|coding|off>');
+    process.exit(1);
+  }
+
+  const normalized = normalizeStyle(style);
+  if (!normalized) {
+    console.error(`invalid style: ${style}`);
+    console.error(`valid styles: ${VALID_STYLES.join(', ')}`);
+    process.exit(1);
+  }
+
+  const benchSlug = sanitizeSlug(name || `style-${normalized}`);
+  const apiDir = path.join(dataDir, `api-bodies-${benchSlug}-${timestampSlug()}`);
+
+  console.log('TOKENLESS-STYLE-BENCHMARK/0.1');
+  console.log(`action: start`);
+  console.log(`style: ${normalized}`);
+  console.log(`api_dir: ${apiDir}`);
+  console.log('');
+  console.log('Start command:');
+  console.log('```bash');
+  console.log('cd /Users/mac/Documents/TokenCap/Tokenless');
+  console.log(`export TOKENLESS_STYLE_BENCH=${JSON.stringify(normalized)}`);
+  console.log(`export TOKENLESS_STYLE_API_DIR=${JSON.stringify(apiDir)}`);
+  console.log('mkdir -p "$TOKENLESS_STYLE_API_DIR"');
+  console.log('export CLAUDE_CODE_ENABLE_TELEMETRY=1');
+  console.log('export OTEL_LOG_RAW_API_BODIES="file:$TOKENLESS_STYLE_API_DIR"');
+  console.log('tokenless style "$TOKENLESS_STYLE_BENCH"');
+  console.log('tokenless launch');
+  console.log('```');
+  console.log('');
+  console.log('Prompt set:');
+  console.log('```text');
+  console.log('1. 解释一下 React useMemo 什么时候该用，什么时候不该用。');
+  console.log('2. 给我一个 Node.js CLI 工具的错误处理设计建议，要求实用。');
+  console.log('3. 假设你刚改完一个前端 dashboard 的筛选区、指标卡、表格状态、按钮反馈，请给最终汇报。');
+  console.log('4. Review 这段逻辑可能有什么 bug：用户 token 过期时间如果小于当前时间就拒绝请求，否则通过。');
+  console.log('5. 把这个功能方案压缩成给工程师看的实现计划：给 Claude Code 加一个输出风格开关，用来减少 response token。');
+  console.log('6. 总结一下这轮测试结果，并给出你建议默认使用哪个输出模式。');
+  console.log('```');
+  console.log('');
+  console.log('Stats command:');
+  console.log('```bash');
+  console.log('cd /Users/mac/Documents/TokenCap/Tokenless');
+  console.log(`node ${shellQuote(__filename)} api-probe stats \\`);
+  console.log('  --dir "$TOKENLESS_STYLE_API_DIR" \\');
+  console.log(`  --data-dir ${shellQuote(dataDir)}`);
+  console.log('```');
 }
 
 function installSlashCommands({ dataDir, commandsDir, dryRun }) {
@@ -1150,7 +1337,18 @@ function installSlashCommands({ dataDir, commandsDir, dryRun }) {
 
 function uninstallSlashCommands({ commandsDir, dryRun }) {
   const targetDir = getSlashCommandsDir({ commandsDir });
-  const files = ['tokenless.md', 'tokenless-latest.md', 'tokenless-expand.md', 'tokenless-doctor.md', 'tokenless-mode.md'];
+  const files = [
+    'tokenless.md',
+    'tokenless-style-chat.md',
+    'tokenless-style-lean.md',
+    'tokenless-style-silent.md',
+    'tokenless-style-coding.md',
+    'tokenless-style-off.md',
+    'tokenless-latest.md',
+    'tokenless-expand.md',
+    'tokenless-doctor.md',
+    'tokenless-mode.md'
+  ];
 
   console.log('TOKENLESS-UNINSTALL-COMMANDS/0.1');
   console.log('scope: user');
@@ -1304,12 +1502,16 @@ function printStatus({ scope, settingsPath }) {
   const targetPath = getSettingsPath(scope, settingsPath);
   const rawMode = String(process.env.TOKENLESS_MODE || 'on').trim() || 'on';
   const disabled = /^(0|false|off|disabled)$/i.test(rawMode);
+  const style = readStyleConfig();
   console.log('TOKENLESS-STATUS/0.1');
   console.log(`scope: ${scope || 'custom'}`);
   console.log(`settings: ${targetPath}`);
   console.log(`mode: ${disabled ? 'off' : 'on'}`);
   console.log(`mode_source: ${process.env.TOKENLESS_MODE ? 'TOKENLESS_MODE' : 'default'}`);
   console.log(`mode_raw: ${rawMode}`);
+  console.log(`style: ${style.style}`);
+  console.log(`style_source: ${style.source}`);
+  console.log(`style_path: ${style.path}`);
   console.log(`settings_exists: ${fs.existsSync(targetPath) ? 'yes' : 'no'}`);
 
   if (!fs.existsSync(targetPath)) {
@@ -2650,6 +2852,18 @@ async function main() {
   if (command === 'launch' || command === 'claude') {
     launchClaude(args.slice(1));
     return;
+  }
+
+  if (command === 'style') {
+    const parsed = parseStyleArgs(args.slice(1));
+    printStyle(parsed);
+    process.exit(0);
+  }
+
+  if (command === 'style-benchmark') {
+    const parsed = parseStyleBenchmarkArgs(args.slice(1));
+    printStyleBenchmark(parsed);
+    process.exit(0);
   }
 
   if (command === 'api-probe') {
