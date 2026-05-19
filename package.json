@@ -1,6 +1,6 @@
 {
   "name": "tokenless",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Tokenless context compression for noisy Claude Code tool output",
   "type": "commonjs",
   "license": "MIT",
