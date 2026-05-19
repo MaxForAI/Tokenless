@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.3.2 - 2026-05-19
+
+### Documentation
+
+- Updated Quick start and installation examples to use `tokenless repair-hooks --user`, which works for fresh installs and also fixes stale hook paths after upgrading or switching from a local `npm link` install.
+
 ## v0.3.1 - 2026-05-19
 
 ### Documentation
