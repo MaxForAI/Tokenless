@@ -28,6 +28,7 @@
   <a href="#installation">Install</a> ·
   <a href="#output-profiles">Profiles</a> ·
   <a href="#benchmarks--evidence">Benchmarks & Evidence</a> ·
+  <a href="#roadmap">Roadmap</a> ·
   <a href="docs/benchmarking.md">Full benchmark guide</a>
 </p>
 
@@ -113,6 +114,14 @@ The research does not prove Tokenless automatically helps every session. It supp
 | [LongLLMLingua](https://arxiv.org/abs/2310.06839) | Long-context compression can improve key-information perception while reducing cost and latency. |
 | [Selective Context](https://arxiv.org/abs/2310.06201) | Pruning redundant context reported 50% context-cost reduction, 36% memory reduction, and 32% inference-time reduction with minor quality loss. |
 | [Gist Tokens](https://arxiv.org/abs/2304.08467) | Learned prompt compression reached up to 26x prompt compression and up to 40% FLOPs reduction. |
+
+## Roadmap
+
+Tokenless currently focuses on Claude Code context growth from tool output, file reads, and response verbosity. Next areas:
+
+- User prompt compression: identify repeated prompt patterns, compress user intent without losing constraints, and keep the original prompt recoverable.
+- Router-side optimization: reduce duplicated context and style overhead before requests hit the model backend.
+- Broader workflow support: keep Claude Code as the primary target, then evaluate adapters for other agentic coding tools where the same context-growth problem appears.
 
 ## Installation
 

@@ -21,6 +21,7 @@
   <a href="#快速开始">快速开始</a> ·
   <a href="#输出模式">输出模式</a> ·
   <a href="#benchmark-与证据">Benchmark 与证据</a> ·
+  <a href="#路线图">路线图</a> ·
   <a href="#隐私和安全">隐私和安全</a> ·
   <a href="docs/benchmarking.md">完整测试方法</a>
 </p>
@@ -111,6 +112,14 @@ Tokenless 的证据分两层：一层是真实 Claude Code API-body benchmark，
 | [LongLLMLingua](https://arxiv.org/abs/2310.06839) | 长上下文压缩可以提升关键信息感知，同时降低成本和延迟。 |
 | [Selective Context](https://arxiv.org/abs/2310.06201) | 剪掉冗余上下文，实现 50% context cost、36% memory、32% inference time 降低，质量损失较小。 |
 | [Gist Tokens](https://arxiv.org/abs/2304.08467) | 训练模型把 prompt 压缩成可复用 token，最高达到 26x prompt compression 和 40% FLOPs 降低。 |
+
+## 路线图
+
+Tokenless 现在主要处理 Claude Code 里的工具输出、文件读取和回复冗长带来的上下文膨胀。下一步会继续做：
+
+- 用户 prompt 压缩：识别用户输入里的重复模式，在不丢失约束的前提下压缩意图，并保留原始 prompt 可回溯。
+- Router 侧优化：在请求进入模型后端之前，减少重复上下文和风格控制开销。
+- 更广的工作流支持：Claude Code 仍然是第一目标，之后评估其他 coding agent 工具里类似的上下文膨胀问题。
 
 ## 安装
 

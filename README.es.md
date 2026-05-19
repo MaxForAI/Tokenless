@@ -21,6 +21,7 @@
   <a href="#quick-start">Quick start</a> ·
   <a href="#perfiles-de-salida">Perfiles</a> ·
   <a href="#benchmark-evidence">Benchmark Evidence</a> ·
+  <a href="#roadmap">Roadmap</a> ·
   <a href="#privacidad-y-seguridad">Privacidad</a> ·
   <a href="docs/benchmarking.md">Guía completa</a>
 </p>
@@ -99,6 +100,14 @@ Detailed methodology and raw run notes are in [docs/benchmarking.md](docs/benchm
 - [LLMLingua](https://arxiv.org/abs/2310.05736) and [LongLLMLingua](https://arxiv.org/abs/2310.06839): prompt and long-context compression can reduce cost and latency while preserving key information.
 - [Selective Context](https://arxiv.org/abs/2310.06201): pruning redundant context reported 50% context-cost reduction.
 - [Gist Tokens](https://arxiv.org/abs/2304.08467): learned prompt compression reached up to 26x prompt compression.
+
+## Roadmap
+
+Tokenless currently focuses on Claude Code context growth from tool output, file reads, and response verbosity. Next areas:
+
+- User prompt compression: compress repeated prompt patterns while preserving original constraints and recoverability.
+- Router-side optimization: reduce duplicated context and style overhead before requests reach the model backend.
+- Broader workflow support: keep Claude Code as the primary target, then evaluate adapters for other agentic coding tools.
 
 ## Instalación
 
