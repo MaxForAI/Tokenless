@@ -19,7 +19,6 @@
 <p align="center">
   <a href="#instalación">Instalación</a> ·
   <a href="#perfiles-de-salida">Perfiles</a> ·
-  <a href="#contexto-de-investigación">Investigación</a> ·
   <a href="#benchmarks-verificados">Benchmarks</a> ·
   <a href="#privacidad-y-seguridad">Privacidad</a> ·
   <a href="docs/benchmarking.md">Guía completa</a>
@@ -59,17 +58,6 @@ file: /path/to/src/App.tsx
 artifact_id: ctx_20260518_abc123
 summary: imports, symbols, snippets, nearby files, exact expansion commands
 ```
-
-## Contexto de investigación
-
-Tokenless es una herramienta de ingeniería, no una afirmación de que lo más corto siempre es mejor. Pero su dirección está respaldada por investigación sobre prompt y context compression.
-
-- [Brevity Constraints Reverse Performance Hierarchies in Language Models](https://arxiv.org/abs/2604.00025) (Hakim, 2026) encontró que las restricciones de brevedad mejoran la accuracy de modelos grandes en 26.3 puntos en ciertos problemas de inverse scaling. Lo verboso no siempre es mejor.
-- [LLMLingua](https://arxiv.org/abs/2310.05736) (Jiang et al., 2023) mostró que prompt compression puede reducir el coste de inferencia manteniendo la integridad semántica.
-- [LongLLMLingua](https://arxiv.org/abs/2310.06839) (Jiang et al., 2024) mostró que long-context compression puede mejorar la percepción de información clave y reducir coste y latencia.
-- [Selective Context](https://arxiv.org/abs/2310.06201) (Li et al., 2023) podó contexto redundante y reportó 50% menos context cost, 36% menos memoria y 32% menos inference time.
-- [Gist Tokens](https://arxiv.org/abs/2304.08467) (Mu et al., 2023) comprimió prompts en tokens reutilizables, alcanzando hasta 26x prompt compression y hasta 40% FLOPs reduction.
-- [Prompt Compression in the Wild](https://arxiv.org/abs/2604.02985) (Kummer et al., 2026) mostró que las ganancias de latencia dependen de la carga de trabajo, lo que encaja con Tokenless: comprimir contexto grande y ruidoso de Claude Code, no comprimir todo.
 
 ## Benchmarks verificados
 

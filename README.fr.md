@@ -19,7 +19,6 @@
 <p align="center">
   <a href="#installation">Installation</a> ·
   <a href="#profils-de-sortie">Profils</a> ·
-  <a href="#contexte-de-recherche">Recherche</a> ·
   <a href="#benchmarks-vérifiés">Benchmarks</a> ·
   <a href="#confidentialité-et-sécurité">Confidentialité</a> ·
   <a href="docs/benchmarking.md">Méthode complète</a>
@@ -59,17 +58,6 @@ file: /path/to/src/App.tsx
 artifact_id: ctx_20260518_abc123
 summary: imports, symbols, snippets, nearby files, exact expansion commands
 ```
-
-## Contexte de recherche
-
-Tokenless est un outil d'ingénierie, pas une affirmation que les réponses plus courtes sont toujours meilleures. Mais son orientation est cohérente avec plusieurs travaux sur la compression de prompts et de contexte.
-
-- [Brevity Constraints Reverse Performance Hierarchies in Language Models](https://arxiv.org/abs/2604.00025) (Hakim, 2026) montre que des contraintes de brièveté améliorent l'accuracy des grands modèles de 26.3 points sur certains problèmes d'inverse scaling. Verbose n'est pas toujours meilleur.
-- [LLMLingua](https://arxiv.org/abs/2310.05736) (Jiang et al., 2023) montre que la compression de prompt peut réduire le coût d'inférence tout en préservant l'intégrité sémantique.
-- [LongLLMLingua](https://arxiv.org/abs/2310.06839) (Jiang et al., 2024) montre que la compression de long contexte peut améliorer la perception des informations clés tout en réduisant coût et latence.
-- [Selective Context](https://arxiv.org/abs/2310.06201) (Li et al., 2023) réduit le contexte redondant et rapporte 50% de réduction du coût de contexte, 36% de réduction mémoire et 32% de réduction du temps d'inférence.
-- [Gist Tokens](https://arxiv.org/abs/2304.08467) (Mu et al., 2023) compresse les prompts en tokens réutilisables, avec jusqu'à 26x de compression et jusqu'à 40% de réduction des FLOPs.
-- [Prompt Compression in the Wild](https://arxiv.org/abs/2604.02985) (Kummer et al., 2026) montre que les gains de latence dépendent de la charge de travail, ce qui correspond à la politique de Tokenless: compresser les gros contextes bruyants plutôt que tout compresser.
 
 ## Benchmarks vérifiés
 

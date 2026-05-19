@@ -26,7 +26,6 @@
   <a href="#before--after">Before / After</a> ·
   <a href="#installation">Install</a> ·
   <a href="#output-profiles">Profiles</a> ·
-  <a href="#research-context">Research</a> ·
   <a href="#verified-results">Benchmarks</a> ·
   <a href="docs/benchmarking.md">Full benchmark guide</a>
 </p>
@@ -60,17 +59,6 @@ Claude Code sessions can become expensive because tool outputs, file reads, task
 - Large tool output: test logs, build logs, search results, tree output, diffs, large reads, and large successful edit/write results.
 - Agent trajectory overhead: repeated request context, high-overhead Task/Plan tools, and large raw file payloads.
 - Response verbosity: optional `chat` and `coding` profiles reduce assistant output tokens.
-
-## Research context
-
-Tokenless is an engineering tool, not a claim that shorter is always better. The direction is supported by a growing body of prompt and context compression research:
-
-- [Brevity Constraints Reverse Performance Hierarchies in Language Models](https://arxiv.org/abs/2604.00025) (Hakim, 2026) found that brevity constraints improved large-model accuracy by 26.3 percentage points on inverse-scaling problems. Verbose is not always better; sometimes shorter answers are more correct.
-- [LLMLingua](https://arxiv.org/abs/2310.05736) (Jiang et al., 2023) showed prompt compression can reduce inference cost while preserving semantic integrity under high compression ratios.
-- [LongLLMLingua](https://arxiv.org/abs/2310.06839) (Jiang et al., 2024) showed long-context compression can improve key-information perception while reducing cost and latency.
-- [Selective Context](https://arxiv.org/abs/2310.06201) (Li et al., 2023) pruned redundant context and reported 50% context-cost reduction, 36% memory reduction, and 32% inference-time reduction with only minor quality loss.
-- [Gist Tokens](https://arxiv.org/abs/2304.08467) (Mu et al., 2023) trained models to compress prompts into reusable tokens, reaching up to 26x prompt compression and up to 40% FLOPs reduction.
-- [Prompt Compression in the Wild](https://arxiv.org/abs/2604.02985) (Kummer et al., 2026) found real latency gains are workload-dependent, which matches Tokenless's policy: compress noisy, large Claude Code context rather than compressing everything.
 
 ## Verified results
 

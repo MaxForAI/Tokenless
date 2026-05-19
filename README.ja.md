@@ -19,7 +19,6 @@
 <p align="center">
   <a href="#インストール">インストール</a> ·
   <a href="#出力プロファイル">プロファイル</a> ·
-  <a href="#研究背景">研究背景</a> ·
   <a href="#検証済み-benchmark">Benchmark</a> ·
   <a href="#プライバシーと安全性">プライバシー</a> ·
   <a href="docs/benchmarking.md">詳細な検証方法</a>
@@ -59,17 +58,6 @@ file: /path/to/src/App.tsx
 artifact_id: ctx_20260518_abc123
 summary: imports, symbols, snippets, nearby files, exact expansion commands
 ```
-
-## 研究背景
-
-Tokenless は engineering tool であり、「短ければ常に良い」という主張ではありません。ただし、prompt / context compression 研究とは同じ方向を向いています。
-
-- [Brevity Constraints Reverse Performance Hierarchies in Language Models](https://arxiv.org/abs/2604.00025) (Hakim, 2026) は、brevity constraints により一部の inverse-scaling 問題で large-model accuracy が 26.3 percentage points 改善することを報告しています。Verbose が常に良いわけではありません。
-- [LLMLingua](https://arxiv.org/abs/2310.05736) (Jiang et al., 2023) は、semantic integrity を保ちながら prompt compression により inference cost を削減できることを示しました。
-- [LongLLMLingua](https://arxiv.org/abs/2310.06839) (Jiang et al., 2024) は、long-context compression が key information perception を改善し、cost と latency を下げられることを示しました。
-- [Selective Context](https://arxiv.org/abs/2310.06201) (Li et al., 2023) は redundant context を pruning し、50% context-cost reduction、36% memory reduction、32% inference-time reduction を報告しました。
-- [Gist Tokens](https://arxiv.org/abs/2304.08467) (Mu et al., 2023) は prompts を reusable gist tokens に圧縮し、最大 26x prompt compression と 40% FLOPs reduction を達成しました。
-- [Prompt Compression in the Wild](https://arxiv.org/abs/2604.02985) (Kummer et al., 2026) は latency gain が workload-dependent であることを示しており、Tokenless が noisy and large Claude Code context に絞って圧縮する理由と一致します。
 
 ## 検証済み Benchmark
 

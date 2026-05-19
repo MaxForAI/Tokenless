@@ -19,7 +19,6 @@
 <p align="center">
   <a href="#安装">安装</a> ·
   <a href="#输出模式">输出模式</a> ·
-  <a href="#研究背景">研究背景</a> ·
   <a href="#真实-benchmark">Benchmark</a> ·
   <a href="#隐私和安全">隐私和安全</a> ·
   <a href="docs/benchmarking.md">完整测试方法</a>
@@ -59,17 +58,6 @@ file: /path/to/src/App.tsx
 artifact_id: ctx_20260518_abc123
 summary: imports, symbols, snippets, nearby files, exact expansion commands
 ```
-
-## 研究背景
-
-Tokenless 是一个工程工具，不是说“越短一定越好”。但它的方向和近几年 prompt / context compression 研究是一致的：
-
-- [Brevity Constraints Reverse Performance Hierarchies in Language Models](https://arxiv.org/abs/2604.00025) (Hakim, 2026) 发现，在一类 inverse-scaling 问题上，限制大模型回答长度可以让准确率提升 26.3 个百分点。Verbose 不总是更好，有时更短反而更正确。
-- [LLMLingua](https://arxiv.org/abs/2310.05736) (Jiang et al., 2023) 证明 prompt compression 可以在高压缩率下尽量保留语义完整性，同时降低推理成本。
-- [LongLLMLingua](https://arxiv.org/abs/2310.06839) (Jiang et al., 2024) 表明长上下文压缩可以提升模型对关键信息的感知，同时降低成本和延迟。
-- [Selective Context](https://arxiv.org/abs/2310.06201) (Li et al., 2023) 通过剪掉冗余上下文，实现 50% context cost 降低、36% memory 降低、32% inference time 降低，质量损失较小。
-- [Gist Tokens](https://arxiv.org/abs/2304.08467) (Mu et al., 2023) 训练模型把 prompt 压缩成可复用 token，最高达到 26x prompt compression 和 40% FLOPs 降低。
-- [Prompt Compression in the Wild](https://arxiv.org/abs/2604.02985) (Kummer et al., 2026) 发现真实延迟收益取决于工作负载，这也解释了 Tokenless 的策略：只压缩 Claude Code 里又大又吵的上下文，而不是压缩一切。
 
 ## 真实 Benchmark
 
