@@ -32,13 +32,11 @@
 
 ---
 
-Tokenless is a Claude Code plugin for reducing API context growth during coding workflows. It intercepts noisy tool output before it enters model context, stores the raw output locally, and sends Claude a compact evidence packet.
+Claude Code gets expensive when every log, file read, diff, and long reply keeps getting carried into the next request.
 
-It also provides output profiles that make Claude responses shorter for everyday chat and denser for coding sessions.
+Tokenless fixes that.
 
-Tokenless is not an LLM summarizer and does not send data to a separate service. Reducers are deterministic and local. Raw artifacts stay on disk and can be expanded only when needed.
-
-Current packet format: `TOKENLESS-PACKET/0.1`.
+It keeps the raw evidence on your machine, sends Claude a compact version, and lets you expand the original output only when you need it.
 
 ## Before / After
 

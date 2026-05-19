@@ -26,13 +26,11 @@
 
 ---
 
-Tokenless est un plugin Claude Code qui réduit la croissance du contexte API pendant les workflows de coding.
+Claude Code devient coûteux quand chaque log, lecture de fichier, diff et longue réponse continue d'être transporté dans la requête suivante.
 
-Il intercepte les sorties d'outils volumineuses avant leur entrée dans le contexte du modèle, conserve la sortie brute sur le disque local, puis envoie à Claude un paquet de preuves compact. Claude peut ensuite développer uniquement la partie utile, par ligne ou par mot-clé.
+Tokenless corrige ce problème.
 
-Tokenless n'est pas un résumeur LLM. Il n'envoie pas vos données à un service séparé. Les reducers sont locaux et déterministes.
-
-Format actuel des paquets: `TOKENLESS-PACKET/0.1`.
+Il garde les preuves brutes sur votre machine, envoie à Claude une version compacte, puis vous laisse développer la sortie originale seulement quand vous en avez besoin.
 
 ## Pourquoi Tokenless
 

@@ -26,13 +26,11 @@
 
 ---
 
-Tokenless は、Claude Code の coding workflow で API context が膨らむ問題を抑えるためのプラグインです。
+Claude Code が高くつく理由は、コードを書きすぎることだけではありません。log、file read、diff、長い reply が次の request に何度も持ち込まれるからです。
 
-大きな tool output が model context に入る前に intercept し、元の出力はローカルに保存します。Claude には compact な evidence packet だけを渡し、必要なときだけ元データを行番号やキーワードで展開できます。
+Tokenless はその問題を解決します。
 
-Tokenless は LLM summarizer ではありません。別サービスにデータを送信しません。reducer はローカルで決定的に動作します。
-
-現在の packet format: `TOKENLESS-PACKET/0.1`。
+Raw evidence はあなたの machine に残し、Claude には compact な context だけを送ります。必要なときだけ元の output を展開できます。
 
 ## なぜ Tokenless か
 
