@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.1 - 2026-05-19
+
+### Documentation
+
+- Added localized README files for Chinese, Japanese, French, and Spanish.
+- Added a first-screen Quick start section.
+- Reworked the benchmark section into `Benchmarks & Evidence`, combining real Claude Code API-body results with related compression and brevity research.
+- Restored the faucet logo and added star, license, and acknowledgements sections.
+- Fixed README benchmark badge anchors after the benchmark section rename.
+
 ## v0.3.0 - 2026-05-19
 
 ### Changed

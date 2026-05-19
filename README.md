@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="#verified-results"><img alt="vibe coding request reduction" src="https://img.shields.io/badge/vibe%20coding-47.3%25%20less%20request%20tokens-2dd4bf?style=for-the-badge"></a>
+  <a href="#benchmarks--evidence"><img alt="vibe coding request reduction" src="https://img.shields.io/badge/vibe%20coding-47.3%25%20less%20request%20tokens-2dd4bf?style=for-the-badge"></a>
   <a href="#output-profiles"><img alt="chat response reduction" src="https://img.shields.io/badge/chat-80.0%25%20less%20response%20tokens-4ade80?style=for-the-badge"></a>
   <a href="LICENSE"><img alt="license MIT" src="https://img.shields.io/badge/license-MIT-f59e0b?style=for-the-badge"></a>
 </p>
